@@ -1,0 +1,27 @@
+# Upstream reference clone (not part of this repo)
+/reference/
+
+# Build output
+/bin/
+/dist/
+/whatsapp-mcp
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Runtime data (SQLite stores, session blobs, etc.)
+/data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
