@@ -1,0 +1,14 @@
+.git
+.github
+.gitignore
+.golangci.yml
+.dockerignore
+bin/
+dist/
+data/
+reference/
+coverage.out
+coverage.html
+*.test
+*.out
+*.md
