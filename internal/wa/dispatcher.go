@@ -3,6 +3,7 @@ package wa
 import (
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
@@ -83,7 +84,7 @@ func (c *Client) handle(raw any) {
 
 	case *events.LoggedOut:
 		c.stopReconnect.Store(true)
-		c.wm.Disconnect()
+		c.currentWM().Disconnect()
 		c.setState(StateLoggedOut)
 		c.fanout(Event{
 			Type:          EventLoggedOut,
@@ -93,7 +94,7 @@ func (c *Client) handle(raw any) {
 
 	case *events.StreamReplaced:
 		c.stopReconnect.Store(true)
-		c.wm.Disconnect()
+		c.currentWM().Disconnect()
 		c.setState(StateStreamReplaced)
 		c.fanout(Event{Type: EventStreamReplaced, Timestamp: now})
 
@@ -117,6 +118,8 @@ func (c *Client) handle(raw any) {
 
 func (c *Client) fanout(evt Event) {
 	c.mu.Lock()
+	c.lastEvent = evt
+	c.lastEventSet = true
 	subs := append([]*subscriber(nil), c.subs...)
 	c.mu.Unlock()
 	for _, s := range subs {
@@ -132,6 +135,14 @@ func (c *Client) setState(s State) {
 	c.mu.Lock()
 	c.state = s
 	c.mu.Unlock()
+}
+
+// currentWM returns a live pointer to the whatsmeow client under c.mu.
+// Callers must not hold c.mu.
+func (c *Client) currentWM() *whatsmeow.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.wm
 }
 
 func (c *Client) closeAllSubs() {

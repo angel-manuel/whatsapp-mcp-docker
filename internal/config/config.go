@@ -22,36 +22,45 @@ const (
 
 // Config is the fully-resolved runtime configuration.
 type Config struct {
-	Transport      Transport
-	BindAddr       string
-	Port           int
-	AdminPort      int
-	DataDir        string
-	LogLevel       string
-	LogFormat      string
-	AuthToken      string
-	MTLSCAFile     string
-	MTLSCertFile   string
-	MTLSKeyFile    string
-	PairDeviceName string
-	FFmpegPath     string
-	EnablePprof    bool
+	Transport Transport
+	BindAddr  string
+	// BindAddrExplicit reports whether BIND_ADDR was set in the environment
+	// (vs. falling back to the default). The stdio transport uses this to
+	// decide whether the admin listener should be clamped to 127.0.0.1.
+	BindAddrExplicit bool
+	Port             int
+	AdminPort        int
+	DataDir          string
+	LogLevel         string
+	LogFormat        string
+	AuthToken        string
+	MTLSCAFile       string
+	MTLSCertFile     string
+	MTLSKeyFile      string
+	PairDeviceName   string
+	FFmpegPath       string
+	EnablePprof      bool
 }
 
 // Load reads the process environment into a Config and validates it.
 func Load() (*Config, error) {
+	bindAddr, bindAddrExplicit := lookupNonEmpty("BIND_ADDR")
+	if !bindAddrExplicit {
+		bindAddr = "0.0.0.0"
+	}
 	cfg := &Config{
-		Transport:      Transport(strings.ToLower(getEnv("TRANSPORT", "http"))),
-		BindAddr:       getEnv("BIND_ADDR", "0.0.0.0"),
-		DataDir:        getEnv("DATA_DIR", "/data"),
-		LogLevel:       strings.ToLower(getEnv("LOG_LEVEL", "info")),
-		LogFormat:      strings.ToLower(getEnv("LOG_FORMAT", "json")),
-		AuthToken:      os.Getenv("AUTH_TOKEN"),
-		MTLSCAFile:     os.Getenv("MTLS_CA_FILE"),
-		MTLSCertFile:   os.Getenv("MTLS_CERT_FILE"),
-		MTLSKeyFile:    os.Getenv("MTLS_KEY_FILE"),
-		PairDeviceName: getEnv("PAIR_DEVICE_NAME", "whatsapp-mcp"),
-		FFmpegPath:     getEnv("FFMPEG_PATH", "/usr/bin/ffmpeg"),
+		Transport:        Transport(strings.ToLower(getEnv("TRANSPORT", "http"))),
+		BindAddr:         bindAddr,
+		BindAddrExplicit: bindAddrExplicit,
+		DataDir:          getEnv("DATA_DIR", "/data"),
+		LogLevel:         strings.ToLower(getEnv("LOG_LEVEL", "info")),
+		LogFormat:        strings.ToLower(getEnv("LOG_FORMAT", "json")),
+		AuthToken:        os.Getenv("AUTH_TOKEN"),
+		MTLSCAFile:       os.Getenv("MTLS_CA_FILE"),
+		MTLSCertFile:     os.Getenv("MTLS_CERT_FILE"),
+		MTLSKeyFile:      os.Getenv("MTLS_KEY_FILE"),
+		PairDeviceName:   getEnv("PAIR_DEVICE_NAME", "whatsapp-mcp"),
+		FFmpegPath:       getEnv("FFMPEG_PATH", "/usr/bin/ffmpeg"),
 	}
 
 	var err error
@@ -138,6 +147,16 @@ func getEnv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// lookupNonEmpty returns the env var value and whether it was both set and
+// non-empty. An empty value is treated the same as unset for "explicit-ness".
+func lookupNonEmpty(key string) (string, bool) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return "", false
+	}
+	return v, true
 }
 
 func getEnvInt(key string, def int) (int, error) {
