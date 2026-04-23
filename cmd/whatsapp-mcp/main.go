@@ -22,6 +22,8 @@ func main() {
 }
 
 func run() error {
+	server.Version = version
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
