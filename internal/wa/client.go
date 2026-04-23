@@ -22,8 +22,24 @@ import (
 // DefaultDataDir is used when Config.DataDir is empty.
 const DefaultDataDir = "/data"
 
-// ErrNotPaired is returned by Connect when no paired device is present.
-var ErrNotPaired = errors.New("wa: no paired device present")
+// DefaultPairClientDisplay is the "Browser (OS)" string the WhatsApp server
+// accepts when pairing via phone code; it appears on the user's phone.
+const DefaultPairClientDisplay = "Chrome (Linux)"
+
+// Errors returned by the admin ops on Client.
+var (
+	// ErrNotPaired is returned by Connect when no paired device is present.
+	ErrNotPaired = errors.New("wa: no paired device present")
+	// ErrAlreadyPaired is returned by StartPairing when a device is already
+	// present on disk. Callers should call Unpair first.
+	ErrAlreadyPaired = errors.New("wa: already paired")
+	// ErrPairInProgress is returned by StartPairing when another pair flow
+	// already holds the admin lock.
+	ErrPairInProgress = errors.New("wa: pair flow already in progress")
+	// ErrNotPairing is returned by PairPhone when no pair flow is active
+	// (PairPhone shares the socket opened by StartPairing).
+	ErrNotPairing = errors.New("wa: no active pair flow; call /admin/pair/start first")
+)
 
 // Config controls how the wa.Client is constructed.
 type Config struct {
@@ -32,6 +48,12 @@ type Config struct {
 	DataDir string
 	// Logger receives whatsmeow's internal logs. Nil defaults to Noop.
 	Logger waLog.Logger
+	// PairDeviceName is the label shown on the user's phone after pairing.
+	// Empty defaults to "whatsapp-mcp".
+	PairDeviceName string
+	// PairClientDisplay is the "Browser (OS)" string sent during phone-code
+	// pairing. Empty defaults to DefaultPairClientDisplay.
+	PairClientDisplay string
 }
 
 // Client owns the whatsmeow client, the sqlstore container, and the lifecycle
@@ -40,16 +62,29 @@ type Client struct {
 	log waLog.Logger
 	cfg Config
 
-	lock      *lockfile
+	lock *lockfile
+
+	// adminMu serializes mutating admin operations (StartPairing, PairPhone,
+	// Unpair) against each other. Holders must not also hold mu.
+	adminMu sync.Mutex
+
+	// pairing is non-nil while a /admin/pair/start flow is active. Protected
+	// by adminMu.
+	pairing *pairSession
+
+	mu        sync.Mutex
 	container *sqlstore.Container
 	device    *store.Device
 	wm        *whatsmeow.Client
+	handlerID uint32
 
 	stopReconnect atomic.Bool
 
-	mu    sync.Mutex
-	state State
-	subs  []*subscriber
+	state        State
+	subs         []*subscriber
+	lastEvent    Event
+	lastEventSet bool
+
 	rawCh chan any
 	quit  chan struct{}
 	done  chan struct{}
@@ -69,6 +104,12 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = waLog.Noop
 	}
+	if cfg.PairDeviceName == "" {
+		cfg.PairDeviceName = "whatsapp-mcp"
+	}
+	if cfg.PairClientDisplay == "" {
+		cfg.PairClientDisplay = DefaultPairClientDisplay
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir %s: %w", cfg.DataDir, err)
 	}
@@ -78,65 +119,32 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	dsn := sessionDSN(cfg.DataDir)
-	container, err := sqlstore.New(ctx, "sqlite3", dsn, cfg.Logger)
-	if err != nil {
-		_ = lock.release()
-		return nil, fmt.Errorf("open sqlstore: %w", err)
-	}
-
-	device, err := container.GetFirstDevice(ctx)
-	if err != nil {
-		_ = container.Close()
-		_ = lock.release()
-		return nil, fmt.Errorf("load device: %w", err)
-	}
-
-	wm := whatsmeow.NewClient(device, cfg.Logger)
-	if wm == nil {
-		_ = container.Close()
-		_ = lock.release()
-		return nil, errors.New("wa: whatsmeow.NewClient returned nil")
-	}
-
 	c := &Client{
-		log:       cfg.Logger,
-		cfg:       cfg,
-		lock:      lock,
-		container: container,
-		device:    device,
-		wm:        wm,
-		rawCh:     make(chan any, 64),
-		quit:      make(chan struct{}),
-		done:      make(chan struct{}),
+		log:   cfg.Logger,
+		cfg:   cfg,
+		lock:  lock,
+		rawCh: make(chan any, 64),
+		quit:  make(chan struct{}),
+		done:  make(chan struct{}),
 	}
-	if device.ID == nil {
+
+	if err := c.openWhatsmeow(ctx); err != nil {
+		_ = lock.release()
+		return nil, err
+	}
+
+	if c.device.ID == nil {
 		c.state = StateNotPaired
 	} else {
 		c.state = StateDisconnected
 	}
 
-	wm.EnableAutoReconnect = true
-	wm.AutoReconnectHook = func(err error) bool {
-		if c.stopReconnect.Load() {
-			cfg.Logger.Infof("wa: auto-reconnect suppressed after logout/stream_replaced (%v)", err)
-			return false
-		}
-		return true
-	}
-
-	wm.AddEventHandler(func(evt any) {
-		select {
-		case c.rawCh <- evt:
-		case <-c.quit:
-		}
-	})
-
 	go c.dispatch()
 
-	if device.ID != nil {
+	if c.device.ID != nil {
 		c.mu.Lock()
 		c.state = StateConnecting
+		wm := c.wm
 		c.mu.Unlock()
 		if cerr := wm.Connect(); cerr != nil {
 			cfg.Logger.Warnf("wa: initial connect failed; auto-reconnect will retry: %v", cerr)
@@ -146,30 +154,82 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 	return c, nil
 }
 
+// openWhatsmeow opens the sqlstore, loads (or creates) the first device, and
+// builds a whatsmeow client wired to this client's dispatch channel. It
+// populates c.container/c.device/c.wm/c.handlerID. Callers must not hold
+// c.mu; openWhatsmeow does not touch c.state or c.stopReconnect.
+func (c *Client) openWhatsmeow(ctx context.Context) error {
+	dsn := sessionDSN(c.cfg.DataDir)
+	container, err := sqlstore.New(ctx, "sqlite3", dsn, c.log)
+	if err != nil {
+		return fmt.Errorf("open sqlstore: %w", err)
+	}
+
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		_ = container.Close()
+		return fmt.Errorf("load device: %w", err)
+	}
+
+	wm := whatsmeow.NewClient(device, c.log)
+	if wm == nil {
+		_ = container.Close()
+		return errors.New("wa: whatsmeow.NewClient returned nil")
+	}
+
+	wm.EnableAutoReconnect = true
+	wm.AutoReconnectHook = func(err error) bool {
+		if c.stopReconnect.Load() {
+			c.log.Infof("wa: auto-reconnect suppressed after logout/stream_replaced (%v)", err)
+			return false
+		}
+		return true
+	}
+
+	handlerID := wm.AddEventHandler(func(evt any) {
+		select {
+		case c.rawCh <- evt:
+		case <-c.quit:
+		}
+	})
+
+	c.mu.Lock()
+	c.container = container
+	c.device = device
+	c.wm = wm
+	c.handlerID = handlerID
+	c.mu.Unlock()
+	return nil
+}
+
 // Connect explicitly connects the underlying whatsmeow client. It is a no-op
 // if already connected, and returns ErrNotPaired when no device is present
 // (the pair flow must drive the pre-pair connection via the QR channel).
 func (c *Client) Connect(_ context.Context) error {
 	c.mu.Lock()
-	if c.device.ID == nil {
+	wm, device := c.wm, c.device
+	if device.ID == nil {
 		c.mu.Unlock()
 		return ErrNotPaired
 	}
-	if c.wm.IsConnected() {
+	if wm.IsConnected() {
 		c.mu.Unlock()
 		return nil
 	}
 	c.stopReconnect.Store(false)
 	c.state = StateConnecting
 	c.mu.Unlock()
-	return c.wm.Connect()
+	return wm.Connect()
 }
 
 // Disconnect tears down the WhatsApp socket without deleting the on-disk
 // session. Auto-reconnect is suppressed until the next Connect.
 func (c *Client) Disconnect() {
 	c.stopReconnect.Store(true)
-	c.wm.Disconnect()
+	c.mu.Lock()
+	wm := c.wm
+	c.mu.Unlock()
+	wm.Disconnect()
 }
 
 // Close disconnects, stops the dispatcher, closes the sqlstore, and releases
@@ -178,13 +238,21 @@ func (c *Client) Close() error {
 	var result error
 	c.closeOnce.Do(func() {
 		c.stopReconnect.Store(true)
-		c.wm.Disconnect()
+		c.mu.Lock()
+		wm := c.wm
+		container := c.container
+		c.mu.Unlock()
+		if wm != nil {
+			wm.Disconnect()
+		}
 		close(c.quit)
 		<-c.done
 
 		var errs []error
-		if err := c.container.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close sqlstore: %w", err))
+		if container != nil {
+			if err := container.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close sqlstore: %w", err))
+			}
 		}
 		if err := c.lock.release(); err != nil {
 			errs = append(errs, fmt.Errorf("release lock: %w", err))
@@ -196,13 +264,37 @@ func (c *Client) Close() error {
 
 // IsPaired reports whether a paired device is present on disk.
 func (c *Client) IsPaired() bool {
-	return c.device.ID != nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.device != nil && c.device.ID != nil
 }
 
 // Whatsmeow returns the underlying whatsmeow client. Callers must treat it as
 // read-mostly; event handling is already owned by this package.
 func (c *Client) Whatsmeow() *whatsmeow.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.wm
+}
+
+// Status returns a point-in-time snapshot of the client's lifecycle state.
+func (c *Client) Status() Status {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := Status{
+		State:     c.state,
+		Connected: c.wm != nil && c.wm.IsConnected(),
+		LoggedIn:  c.wm != nil && c.wm.IsLoggedIn(),
+	}
+	if c.device != nil && c.device.ID != nil {
+		st.JID = c.device.ID.String()
+		st.Pushname = c.device.PushName
+	}
+	if c.lastEventSet {
+		evt := c.lastEvent
+		st.LastEvent = &evt
+	}
+	return st
 }
 
 func sessionDSN(dir string) string {
