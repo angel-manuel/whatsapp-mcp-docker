@@ -1,6 +1,6 @@
 // Package server wires the loaded configuration and logger into a runnable
 // application. It owns the whatsmeow client, the admin HTTP listener, and
-// will later own the MCP transport listener as well.
+// the MCP transport (stdio or HTTP/SSE).
 package server
 
 import (
@@ -16,12 +16,17 @@ import (
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/admin"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/config"
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
 
 // shutdownTimeout bounds graceful HTTP server shutdown so we exit promptly
 // even if a slow SSE consumer ignores the context cancellation.
 const shutdownTimeout = 10 * time.Second
+
+// Version is baked into the MCP server identity. main overrides this via
+// ldflags at build time.
+var Version = "0.0.0-dev"
 
 // Server is the top-level application container.
 type Server struct {
@@ -82,10 +87,26 @@ func (s *Server) Run(ctx context.Context) error {
 	applog.WithEvent(s.log, "admin.listen").Info("admin http listening",
 		slog.String("addr", httpSrv.Addr))
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		if err := httpSrv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+			errCh <- fmt.Errorf("admin http: %w", err)
+			return
+		}
+		errCh <- nil
+	}()
+
+	mcpSrv, err := s.buildMCP(waCli)
+	if err != nil {
+		// Shut the admin listener down before bailing.
+		_ = httpSrv.Shutdown(context.Background())
+		return fmt.Errorf("build mcp server: %w", err)
+	}
+	mcpCtx, mcpCancel := context.WithCancel(ctx)
+	defer mcpCancel()
+	go func() {
+		if err := mcpSrv.Run(mcpCtx); err != nil {
+			errCh <- fmt.Errorf("mcp: %w", err)
 			return
 		}
 		errCh <- nil
@@ -96,6 +117,7 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 	case runErr = <-errCh:
 	}
+	mcpCancel()
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -106,6 +128,24 @@ func (s *Server) Run(ctx context.Context) error {
 
 	applog.WithEvent(s.log, "server.stop").Info("server stopping")
 	return runErr
+}
+
+// buildMCP constructs the MCP subsystem and binds its pairing gate to
+// the whatsmeow client: tools fail with not_paired until the device is
+// both paired AND logged in.
+func (s *Server) buildMCP(waCli *wa.Client) (*mcp.Server, error) {
+	pairing := mcp.PairingStateFunc(func() bool {
+		st := waCli.Status()
+		return st.LoggedIn
+	})
+	return mcp.New(mcp.Config{
+		Transport: mcp.TransportMode(s.cfg.Transport),
+		BindAddr:  s.cfg.BindAddr,
+		Port:      s.cfg.Port,
+		AuthToken: s.cfg.AuthToken,
+		Name:      "whatsapp-mcp",
+		Version:   Version,
+	}, s.log, nil, pairing)
 }
 
 type hostPort struct {
