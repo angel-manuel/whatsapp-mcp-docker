@@ -8,10 +8,8 @@ FROM golang:${GO_VERSION}-bookworm AS builder
 WORKDIR /src
 
 # Cache module resolution separately from source so edits to .go files do not
-# invalidate the module layer.
+# invalidate the module layer. go.sum is added here once the module has deps.
 COPY go.mod ./
-# go.sum is optional until we pull deps; copy it if present.
-COPY go.su[m] ./
 RUN go mod download
 
 COPY . .
