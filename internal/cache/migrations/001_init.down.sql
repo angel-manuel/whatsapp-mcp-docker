@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS messages_au;
+DROP TRIGGER IF EXISTS messages_ad;
+DROP TRIGGER IF EXISTS messages_ai;
+DROP TABLE IF EXISTS messages_fts;
+DROP TABLE IF EXISTS nicknames;
+DROP TABLE IF EXISTS contacts;
+DROP INDEX IF EXISTS idx_messages_sender_ts;
+DROP INDEX IF EXISTS idx_messages_chat_ts;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS chats;
