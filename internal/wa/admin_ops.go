@@ -74,9 +74,9 @@ func (c *Client) StartPairing(ctx context.Context) (<-chan PairEvent, error) {
 		for {
 			select {
 			case <-pairCtx.Done():
-				// Drain remaining items so the underlying goroutine can exit.
-				for range raw {
-				}
+				// whatsmeow's QR emitter observes the same context and will
+				// close its output; any buffered items are GC'd with the
+				// channel, no explicit drain required.
 				return
 			case item, ok := <-raw:
 				if !ok {
@@ -246,4 +246,3 @@ func toPairEvent(item whatsmeow.QRChannelItem) PairEvent {
 		return PairEvent{Type: PairEventError, Error: msg}
 	}
 }
-
