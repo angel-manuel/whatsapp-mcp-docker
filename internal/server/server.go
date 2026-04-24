@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/admin"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/config"
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/tools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
 
@@ -65,6 +67,20 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Cache migrations are schema-only; don't let a fast ctx cancel
+	// leave us with a half-applied schema. Use a detached background
+	// context so Open either succeeds or fails on its own terms.
+	cacheStore, err := cache.Open(context.Background(), s.cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("cache open: %w", err)
+	}
+	defer func() {
+		if err := cacheStore.Close(); err != nil {
+			applog.WithEvent(s.log, "server.stop").Warn("cache close",
+				slog.String("err", err.Error()))
+		}
+	}()
+
 	adminAddr := s.resolveAdminAddr()
 	adminSrv := admin.New(admin.Config{
 		BindAddr:    adminAddr.host,
@@ -102,6 +118,13 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = httpSrv.Shutdown(context.Background())
 		return fmt.Errorf("build mcp server: %w", err)
 	}
+	if err := tools.Register(mcpSrv.Registry(), tools.Deps{
+		Cache: cacheStore,
+		WA:    waCli,
+	}); err != nil {
+		_ = httpSrv.Shutdown(context.Background())
+		return fmt.Errorf("register tools: %w", err)
+	}
 	mcpCtx, mcpCancel := context.WithCancel(ctx)
 	defer mcpCancel()
 	go func() {
@@ -112,10 +135,20 @@ func (s *Server) Run(ctx context.Context) error {
 		errCh <- nil
 	}()
 
+	// Two producers on errCh: the admin HTTP goroutine and the MCP
+	// goroutine. We wait until both have signalled before returning so
+	// callers cannot observe partial shutdown (important for tests that
+	// inspect log sinks).
 	var runErr error
+	pending := 2
+
 	select {
 	case <-ctx.Done():
-	case runErr = <-errCh:
+	case err := <-errCh:
+		pending--
+		if err != nil {
+			runErr = err
+		}
 	}
 	mcpCancel()
 
@@ -124,6 +157,22 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := httpSrv.Shutdown(shutCtx); err != nil {
 		applog.WithEvent(s.log, "admin.shutdown").Warn("graceful shutdown failed",
 			slog.String("err", err.Error()))
+	}
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer drainCancel()
+	for pending > 0 {
+		select {
+		case err := <-errCh:
+			pending--
+			if runErr == nil && err != nil {
+				runErr = err
+			}
+		case <-drainCtx.Done():
+			applog.WithEvent(s.log, "server.stop").Warn("subsystem drain timed out",
+				slog.Int("pending", pending))
+			pending = 0
+		}
 	}
 
 	applog.WithEvent(s.log, "server.stop").Info("server stopping")

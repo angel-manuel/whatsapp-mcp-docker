@@ -32,6 +32,15 @@ const (
 	// ErrNotPaired indicates whatsmeow is not paired/logged-in. Tool
 	// calls fail with this until the device has successfully paired.
 	ErrNotPaired ErrorCode = "not_paired"
+	// ErrInvalidArgument indicates the caller supplied arguments that
+	// the tool refused to accept (empty JID, negative limit, ...).
+	ErrInvalidArgument ErrorCode = "invalid_argument"
+	// ErrNotFound indicates the requested entity could not be located,
+	// neither locally nor via whatsmeow's server-side lookup.
+	ErrNotFound ErrorCode = "not_found"
+	// ErrInternal is the catch-all bucket for failures that are not the
+	// caller's fault (DB error, whatsmeow transport error, ...).
+	ErrInternal ErrorCode = "internal"
 )
 
 // NotPairedMessage is the stable message returned alongside ErrNotPaired.
@@ -151,9 +160,18 @@ func adaptHandler(h Handler) mcpserver.ToolHandlerFunc {
 // NotPairedError constructs the canonical structured tool error
 // returned when whatsmeow is not paired.
 func NotPairedError() *mcpgo.CallToolResult {
+	return ErrorResult(ErrNotPaired, NotPairedMessage)
+}
+
+// ErrorResult is the canonical shape for structured tool errors. Clients
+// are expected to branch on `code` (an ErrorCode) rather than on the free
+// text in `message`. Callers pass a non-empty ErrorCode and a human-
+// readable message; the result is marked IsError=true so mcp-go surfaces
+// it as a tool-level failure rather than a transport error.
+func ErrorResult(code ErrorCode, message string) *mcpgo.CallToolResult {
 	payload := map[string]any{
-		"code":    string(ErrNotPaired),
-		"message": NotPairedMessage,
+		"code":    string(code),
+		"message": message,
 	}
 	body, _ := json.Marshal(payload)
 	return &mcpgo.CallToolResult{
