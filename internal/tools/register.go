@@ -46,6 +46,12 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			InputSchema: getGroupInfoSchema,
 			Handler:     getGroupInfo(deps),
 		},
+		{
+			Name:        "send_message",
+			Description: "Send a WhatsApp text message to a user or group chat. Supports optional quote-reply.",
+			InputSchema: sendMessageSchema,
+			Handler:     sendMessage(deps),
+		},
 	}
 	for _, t := range entries {
 		if err := reg.Register(t); err != nil {
