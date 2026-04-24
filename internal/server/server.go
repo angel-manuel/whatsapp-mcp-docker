@@ -18,6 +18,7 @@ import (
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/config"
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcptools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/tools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
@@ -112,7 +113,7 @@ func (s *Server) Run(ctx context.Context) error {
 		errCh <- nil
 	}()
 
-	mcpSrv, err := s.buildMCP(waCli)
+	mcpSrv, err := s.buildMCP(waCli, cacheStore)
 	if err != nil {
 		// Shut the admin listener down before bailing.
 		_ = httpSrv.Shutdown(context.Background())
@@ -179,14 +180,19 @@ func (s *Server) Run(ctx context.Context) error {
 	return runErr
 }
 
-// buildMCP constructs the MCP subsystem and binds its pairing gate to
-// the whatsmeow client: tools fail with not_paired until the device is
-// both paired AND logged in.
-func (s *Server) buildMCP(waCli *wa.Client) (*mcp.Server, error) {
+// buildMCP constructs the MCP subsystem, binds its pairing gate to the
+// whatsmeow client (tools fail with not_paired until the device is both
+// paired AND logged in), and registers the read-side cache-backed tools
+// against its registry.
+func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store) (*mcp.Server, error) {
 	pairing := mcp.PairingStateFunc(func() bool {
 		st := waCli.Status()
 		return st.LoggedIn
 	})
+	reg := mcp.NewRegistry()
+	if err := mcptools.Register(reg, cacheStore); err != nil {
+		return nil, fmt.Errorf("register cache tools: %w", err)
+	}
 	return mcp.New(mcp.Config{
 		Transport: mcp.TransportMode(s.cfg.Transport),
 		BindAddr:  s.cfg.BindAddr,
@@ -194,7 +200,7 @@ func (s *Server) buildMCP(waCli *wa.Client) (*mcp.Server, error) {
 		AuthToken: s.cfg.AuthToken,
 		Name:      "whatsapp-mcp",
 		Version:   Version,
-	}, s.log, nil, pairing)
+	}, s.log, reg, pairing)
 }
 
 type hostPort struct {

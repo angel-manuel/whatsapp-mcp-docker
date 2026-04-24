@@ -77,13 +77,14 @@ type Handler func(ctx context.Context, args json.RawMessage) (any, error)
 
 // Tool is the registry-level description of a tool. Name is the
 // snake_case identifier clients call; Description is human-readable;
-// InputSchema is the JSONSchema object used for validation and for
-// display in MCP clients; Handler is the callback.
+// InputSchema and OutputSchema are the JSONSchema objects advertised
+// to clients for validation and display; Handler is the callback.
 type Tool struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
-	Handler     Handler
+	Name         string
+	Description  string
+	InputSchema  json.RawMessage
+	OutputSchema json.RawMessage
+	Handler      Handler
 }
 
 // Registry is the in-memory set of tools known to a Server. Tools are
@@ -131,13 +132,20 @@ func (r *Registry) apply(s *mcpserver.MCPServer) {
 }
 
 func newMCPTool(t Tool) mcpgo.Tool {
-	if len(t.InputSchema) == 0 {
+	input := t.InputSchema
+	if len(input) == 0 {
 		// An object-typed empty schema is the safe default: it tells
 		// the client "takes an object, no required fields".
-		return mcpgo.NewToolWithRawSchema(t.Name, t.Description,
-			json.RawMessage(`{"type":"object","properties":{}}`))
+		input = json.RawMessage(`{"type":"object","properties":{}}`)
 	}
-	return mcpgo.NewToolWithRawSchema(t.Name, t.Description, t.InputSchema)
+	// NewToolWithRawSchema only sets RawInputSchema; set the raw output
+	// schema directly on the returned struct since mcp-go's builder has
+	// no "with raw input + raw output" constructor.
+	tool := mcpgo.NewToolWithRawSchema(t.Name, t.Description, input)
+	if len(t.OutputSchema) > 0 {
+		tool.RawOutputSchema = t.OutputSchema
+	}
+	return tool
 }
 
 func adaptHandler(h Handler) mcpserver.ToolHandlerFunc {
@@ -181,6 +189,23 @@ func ErrorResult(code ErrorCode, message string) *mcpgo.CallToolResult {
 		StructuredContent: payload,
 		IsError:           true,
 	}
+}
+
+// NotFoundError is the canonical "lookup by id/jid found nothing" error.
+func NotFoundError(message string) *mcpgo.CallToolResult {
+	return ErrorResult(ErrNotFound, message)
+}
+
+// InvalidArgumentError is the canonical bad-input tool error.
+func InvalidArgumentError(message string) *mcpgo.CallToolResult {
+	return ErrorResult(ErrInvalidArgument, message)
+}
+
+// InternalError wraps an unexpected error (typically a database failure
+// downstream of user input validation) as a structured tool result so
+// the transport layer doesn't leak it as a protocol-level crash.
+func InternalError(message string) *mcpgo.CallToolResult {
+	return ErrorResult(ErrInternal, message)
 }
 
 // pairingMiddleware short-circuits every tool call with a structured
