@@ -92,8 +92,6 @@ type testHarness struct {
 	store  *cache.Store
 }
 
-func (h *testHarness) close() { h.cancel() }
-
 // newHarness constructs an mcp.Server with the tools package registered,
 // a fresh in-memory cache store, and a mock wa client. It wires a stdio
 // client at the other end so tests can drive the real MCP protocol.
@@ -374,12 +372,12 @@ func TestGetGroupInfo_ReturnsWhatsmeowShape(t *testing.T) {
 	ownerJID := types.NewJID("111", types.DefaultUserServer)
 	created := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
 	info := &types.GroupInfo{
-		JID:          groupJID,
-		OwnerJID:     ownerJID,
-		GroupName:    types.GroupName{Name: "Weekend Plans"},
-		GroupTopic:   types.GroupTopic{Topic: "planning"},
-		GroupLocked:  types.GroupLocked{IsLocked: true},
-		GroupCreated: created,
+		JID:           groupJID,
+		OwnerJID:      ownerJID,
+		GroupName:     types.GroupName{Name: "Weekend Plans"},
+		GroupTopic:    types.GroupTopic{Topic: "planning"},
+		GroupLocked:   types.GroupLocked{IsLocked: true},
+		GroupCreated:  created,
 		GroupAnnounce: types.GroupAnnounce{IsAnnounce: true},
 		Participants: []types.GroupParticipant{
 			{JID: ownerJID, IsAdmin: true, IsSuperAdmin: true},
