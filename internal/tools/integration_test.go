@@ -15,6 +15,7 @@ import (
 	mcpclienttransport "github.com/mark3labs/mcp-go/client/transport"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
@@ -37,6 +38,13 @@ type mockWA struct {
 	groupInfoCall int
 	userInfoCall  int
 	picCall       int
+
+	ownJID     types.JID
+	sendResp   whatsmeow.SendResponse
+	sendErr    error
+	sendCalls  int
+	lastSendTo types.JID
+	lastSendMs *waE2E.Message
 }
 
 func (m *mockWA) GroupInfo(_ context.Context, jid types.JID) (*types.GroupInfo, error) {
@@ -80,6 +88,18 @@ func (m *mockWA) ProfilePictureURL(_ context.Context, _ types.JID) (string, erro
 	}
 	return m.profileURL, nil
 }
+
+func (m *mockWA) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
+	m.sendCalls++
+	m.lastSendTo = to
+	m.lastSendMs = msg
+	if m.sendErr != nil {
+		return whatsmeow.SendResponse{}, m.sendErr
+	}
+	return m.sendResp, nil
+}
+
+func (m *mockWA) OwnJID() types.JID { return m.ownJID }
 
 // Confirm the mock satisfies the tools.WAClient interface at compile time.
 var _ tools.WAClient = (*mockWA)(nil)
@@ -485,7 +505,7 @@ func TestTools_NotPairedShortCircuits(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, false, seedContacts, &mockWA{})
 
-	for _, name := range []string{"search_contacts", "list_all_contacts", "get_contact_details", "get_group_info"} {
+	for _, name := range []string{"search_contacts", "list_all_contacts", "get_contact_details", "get_group_info", "send_message"} {
 		t.Run(name, func(t *testing.T) {
 			var args map[string]any
 			switch name {
@@ -495,6 +515,8 @@ func TestTools_NotPairedShortCircuits(t *testing.T) {
 				args = map[string]any{"jid": "111@s.whatsapp.net"}
 			case "get_group_info":
 				args = map[string]any{"group_jid": "xxx@g.us"}
+			case "send_message":
+				args = map[string]any{"recipient": "447700123456", "text": "hi"}
 			}
 			res := callTool(t, h, name, args)
 			if !res.IsError {
@@ -503,6 +525,220 @@ func TestTools_NotPairedShortCircuits(t *testing.T) {
 			s := structured(t, res)
 			if s["code"] != string(mcp.ErrNotPaired) {
 				t.Errorf("code=%v, want %q", s["code"], mcp.ErrNotPaired)
+			}
+		})
+	}
+}
+
+// --- send_message integration tests ---
+
+func TestSendMessage_Success_PersistsOutgoingRow(t *testing.T) {
+	t.Parallel()
+	own := types.NewJID("15551234567", types.DefaultUserServer)
+	sentAt := time.Unix(1_700_100_000, 0).UTC()
+	mock := &mockWA{
+		ownJID:   own,
+		sendResp: whatsmeow.SendResponse{ID: "3EB01ABCDEF", Timestamp: sentAt},
+	}
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_message", map[string]any{
+		"recipient": "447700123456",
+		"text":      "hello",
+	})
+	if res.IsError {
+		t.Fatalf("tool error: %+v", res)
+	}
+	s := structured(t, res)
+	wantChat := "447700123456@s.whatsapp.net"
+	if s["message_id"] != "3EB01ABCDEF" {
+		t.Errorf("message_id=%v, want 3EB01ABCDEF", s["message_id"])
+	}
+	if s["chat_jid"] != wantChat {
+		t.Errorf("chat_jid=%v, want %s", s["chat_jid"], wantChat)
+	}
+	if got, _ := s["sent_ts"].(float64); int64(got) != sentAt.Unix() {
+		t.Errorf("sent_ts=%v, want %d", got, sentAt.Unix())
+	}
+
+	if mock.sendCalls != 1 {
+		t.Fatalf("SendMessage called %d times, want 1", mock.sendCalls)
+	}
+	if mock.lastSendTo.String() != wantChat {
+		t.Errorf("sent to=%s, want %s", mock.lastSendTo.String(), wantChat)
+	}
+	if got := mock.lastSendMs.GetConversation(); got != "hello" {
+		t.Errorf("Conversation=%q, want %q", got, "hello")
+	}
+	if ext := mock.lastSendMs.GetExtendedTextMessage(); ext != nil {
+		t.Errorf("expected bare Conversation (no reply), got ExtendedTextMessage")
+	}
+
+	// Cache mirror must carry the outbound row so list_messages sees it.
+	ctx := context.Background()
+	var (
+		body      string
+		replyTo   string
+		isFromMe  int
+		senderJID string
+		ts        int64
+		kind      string
+	)
+	if err := h.store.DB().QueryRowContext(ctx,
+		`SELECT body, reply_to_id, is_from_me, sender_jid, ts, kind FROM messages WHERE chat_jid = ? AND id = ?`,
+		wantChat, "3EB01ABCDEF").
+		Scan(&body, &replyTo, &isFromMe, &senderJID, &ts, &kind); err != nil {
+		t.Fatalf("scan cached message: %v", err)
+	}
+	if body != "hello" || replyTo != "" || isFromMe != 1 || senderJID != own.ToNonAD().String() ||
+		ts != sentAt.Unix() || kind != string(cache.KindText) {
+		t.Errorf("cached row mismatch: body=%q reply=%q is_from_me=%d sender=%q ts=%d kind=%q",
+			body, replyTo, isFromMe, senderJID, ts, kind)
+	}
+
+	var (
+		isGroup int
+		lastTS  int64
+	)
+	if err := h.store.DB().QueryRowContext(ctx,
+		`SELECT is_group, last_message_ts FROM chats WHERE jid = ?`, wantChat).
+		Scan(&isGroup, &lastTS); err != nil {
+		t.Fatalf("scan cached chat: %v", err)
+	}
+	if isGroup != 0 || lastTS != sentAt.Unix() {
+		t.Errorf("cached chat mismatch: is_group=%d last_ts=%d", isGroup, lastTS)
+	}
+}
+
+func TestSendMessage_ReplyWrapsInExtendedText(t *testing.T) {
+	t.Parallel()
+	own := types.NewJID("15551234567", types.DefaultUserServer)
+	mock := &mockWA{
+		ownJID:   own,
+		sendResp: whatsmeow.SendResponse{ID: "3EB02ABCDEF", Timestamp: time.Unix(1_700_200_000, 0).UTC()},
+	}
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_message", map[string]any{
+		"recipient":   "friend@s.whatsapp.net",
+		"text":        "sure",
+		"reply_to_id": "wamid.ORIG",
+	})
+	if res.IsError {
+		t.Fatalf("tool error: %+v", res)
+	}
+
+	ext := mock.lastSendMs.GetExtendedTextMessage()
+	if ext == nil {
+		t.Fatalf("expected ExtendedTextMessage for reply")
+	}
+	if got := ext.GetText(); got != "sure" {
+		t.Errorf("Text=%q, want sure", got)
+	}
+	ci := ext.GetContextInfo()
+	if ci == nil {
+		t.Fatalf("expected ContextInfo")
+	}
+	if ci.GetStanzaID() != "wamid.ORIG" {
+		t.Errorf("StanzaID=%q", ci.GetStanzaID())
+	}
+	if ci.GetParticipant() != own.ToNonAD().String() {
+		t.Errorf("Participant=%q, want %q", ci.GetParticipant(), own.ToNonAD().String())
+	}
+
+	var replyTo string
+	if err := h.store.DB().QueryRowContext(context.Background(),
+		`SELECT reply_to_id FROM messages WHERE id = ?`, "3EB02ABCDEF").Scan(&replyTo); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if replyTo != "wamid.ORIG" {
+		t.Errorf("cached reply_to_id=%q", replyTo)
+	}
+}
+
+func TestSendMessage_GroupRecipientMarksIsGroup(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{
+		ownJID:   types.NewJID("15551234567", types.DefaultUserServer),
+		sendResp: whatsmeow.SendResponse{ID: "3EB03", Timestamp: time.Unix(1_700_300_000, 0).UTC()},
+	}
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_message", map[string]any{
+		"recipient": "120363000000000000@g.us",
+		"text":      "gm",
+	})
+	if res.IsError {
+		t.Fatalf("tool error: %+v", res)
+	}
+
+	var isGroup int
+	if err := h.store.DB().QueryRowContext(context.Background(),
+		`SELECT is_group FROM chats WHERE jid = ?`, "120363000000000000@g.us").Scan(&isGroup); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if isGroup != 1 {
+		t.Errorf("is_group=%d, want 1 for g.us JID", isGroup)
+	}
+}
+
+func TestSendMessage_SendErrorPropagates_NoCacheRow(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{
+		ownJID:  types.NewJID("15551234567", types.DefaultUserServer),
+		sendErr: errors.New("boom"),
+	}
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_message", map[string]any{
+		"recipient": "447700123456",
+		"text":      "hello",
+	})
+	expectError(t, res, mcp.ErrInternal)
+
+	var n int
+	if err := h.store.DB().QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected no cached rows after failed send, got %d", n)
+	}
+}
+
+func TestSendMessage_NotLoggedInMapsToNotPaired(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{
+		ownJID:  types.NewJID("15551234567", types.DefaultUserServer),
+		sendErr: wa.ErrNotLoggedIn,
+	}
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_message", map[string]any{
+		"recipient": "447700123456",
+		"text":      "hi",
+	})
+	expectError(t, res, mcp.ErrNotPaired)
+}
+
+func TestSendMessage_ValidationErrors(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{ownJID: types.NewJID("15551234567", types.DefaultUserServer)}
+	h := newHarness(t, true, nil, mock)
+
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"blank recipient", map[string]any{"recipient": "   ", "text": "hi"}},
+		{"non-digit recipient", map[string]any{"recipient": "notaphone", "text": "hi"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := callTool(t, h, "send_message", tc.args)
+			expectError(t, res, mcp.ErrInvalidArgument)
+			if mock.sendCalls != 0 {
+				t.Fatalf("SendMessage should not be called on validation error; got %d", mock.sendCalls)
 			}
 		})
 	}
@@ -526,6 +762,7 @@ func TestTools_ListRegisteredToolsAdvertisesSchemas(t *testing.T) {
 		"list_all_contacts":   false,
 		"get_contact_details": false,
 		"get_group_info":      false,
+		"send_message":        false,
 	}
 	for _, tool := range resp.Tools {
 		if _, ok := want[tool.Name]; ok {

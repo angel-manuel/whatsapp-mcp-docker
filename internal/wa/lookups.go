@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -69,6 +70,28 @@ func (c *Client) ProfilePictureURL(ctx context.Context, jid types.JID) (string, 
 		return "", nil
 	}
 	return info.URL, nil
+}
+
+// SendMessage delegates to the underlying whatsmeow client. A
+// re-pair/unpair can swap that client out, so the pointer is resolved
+// per-call. ErrNotLoggedIn is returned when the session is gone.
+func (c *Client) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
+	wm := c.snapshotWM()
+	if wm == nil || !wm.IsLoggedIn() {
+		return whatsmeow.SendResponse{}, ErrNotLoggedIn
+	}
+	return wm.SendMessage(ctx, to, msg)
+}
+
+// OwnJID returns the paired device's non-AD JID, or a zero JID when the
+// client has not been paired yet. Callers should treat the zero value as
+// "not available" rather than querying IsEmpty repeatedly.
+func (c *Client) OwnJID() types.JID {
+	wm := c.snapshotWM()
+	if wm == nil || wm.Store == nil || wm.Store.ID == nil {
+		return types.JID{}
+	}
+	return *wm.Store.ID
 }
 
 // snapshotWM returns the underlying whatsmeow client under lock. Nil is
