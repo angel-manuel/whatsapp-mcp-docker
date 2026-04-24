@@ -4,11 +4,14 @@ MAIN_PKG    := ./cmd/whatsapp-mcp
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 
-IMAGE       ?= whatsapp-mcp-docker
-IMAGE_TAG   ?= $(VERSION)
+# Docker Hub publish target. The CI release workflow overrides IMAGE_TAG with
+# the derived version (e.g. v1.2.3, v1.2.3-slim, latest). Local `make image`
+# builds the distroless variant tagged `:dev`.
+IMAGE       ?= docker.io/angelmanuel/whatsapp-mcp
+IMAGE_TAG   ?= dev
 DATA_DIR    ?= $(CURDIR)/data
 
-.PHONY: build test lint vet tidy clean image run-local
+.PHONY: build test lint vet tidy clean image image-slim run-local
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -33,7 +36,14 @@ image:
 	docker build \
 	  --build-arg VERSION=$(VERSION) \
 	  -t $(IMAGE):$(IMAGE_TAG) \
-	  -t $(IMAGE):latest \
+	  -f Dockerfile \
+	  .
+
+image-slim:
+	docker build \
+	  --build-arg VERSION=$(VERSION) \
+	  -t $(IMAGE):$(IMAGE_TAG)-slim \
+	  -f Dockerfile.slim \
 	  .
 
 run-local: image
