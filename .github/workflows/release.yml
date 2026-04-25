@@ -1,0 +1,177 @@
+name: release
+
+# Publishes the container image to Docker Hub.
+#
+# Triggered by:
+#   * pushing a SemVer tag  (v1.2.3, v1.2.3-rc1, …)  → full release with GH
+#     release notes + SBOM attachments.
+#   * manually via the Actions UI (workflow_dispatch) → builds + pushes the
+#     branch-qualified tags (e.g. :master, :master-slim) so operators can
+#     smoke-test the pipeline without cutting a release.
+#
+# Required repository secrets:
+#   DOCKERHUB_USERNAME  — Docker Hub account that owns the namespace.
+#   DOCKERHUB_TOKEN     — Docker Hub access token with write scope.
+#
+# TODO(hardening): cosign-sign the pushed images + attestations. Deferred from
+# the basic-support milestone; tracked separately under the signing/hardening
+# task.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed for softprops/action-gh-release
+  packages: write
+  id-token: write   # reserved for future cosign keyless signing
+
+env:
+  IMAGE_NAME: docker.io/angelmanuel/whatsapp-mcp
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  build:
+    name: build-${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: distroless
+            dockerfile: Dockerfile
+            suffix: ""
+          - variant: slim
+            dockerfile: Dockerfile.slim
+            suffix: "-slim"
+    outputs:
+      digest-distroless: ${{ steps.capture.outputs.digest-distroless }}
+      digest-slim:       ${{ steps.capture.outputs.digest-slim }}
+      version:           ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # `latest=auto` tags the highest non-prerelease SemVer as :latest
+          # (and :latest-slim for the slim matrix row via `suffix=`).
+          flavor: |
+            latest=auto
+            suffix=${{ matrix.suffix }},onlatest=true
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=whatsapp-mcp
+            org.opencontainers.image.description=Single-container WhatsApp MCP server (whatsmeow + mcp-go)
+            org.opencontainers.image.vendor=angelmanuel
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to:   type=gha,scope=${{ matrix.variant }},mode=max
+
+      - name: Record digest output
+        id: capture
+        run: |
+          echo "digest-${{ matrix.variant }}=${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SPDX SBOM (syft)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: whatsapp-mcp-${{ steps.meta.outputs.version }}${{ matrix.suffix }}.spdx.json
+          # Unique artifact name per matrix row — actions/upload-artifact@v4
+          # rejects duplicate names across jobs in the same run.
+          artifact-name: sbom-${{ matrix.variant }}
+          upload-artifact: true
+          upload-release-assets: false
+
+  release-notes:
+    name: release-notes
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download SBOM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: sboms
+          merge-multiple: true
+
+      - name: Compose release body
+        id: body
+        env:
+          VERSION:    ${{ needs.build.outputs.version }}
+          DISTROLESS: ${{ needs.build.outputs.digest-distroless }}
+          SLIM:       ${{ needs.build.outputs.digest-slim }}
+        run: |
+          {
+            echo "## Container images"
+            echo ""
+            echo "Published to \`${IMAGE_NAME}\`."
+            echo ""
+            echo "### Distroless (primary)"
+            echo ""
+            echo "- Tag: \`${IMAGE_NAME}:${VERSION}\`"
+            echo "- Digest: \`${DISTROLESS}\`"
+            echo "- Pinnable: \`${IMAGE_NAME}@${DISTROLESS}\`"
+            echo ""
+            echo "### Slim (debian:bookworm-slim + ffmpeg)"
+            echo ""
+            echo "- Tag: \`${IMAGE_NAME}:${VERSION}-slim\`"
+            echo "- Digest: \`${SLIM}\`"
+            echo "- Pinnable: \`${IMAGE_NAME}@${SLIM}\`"
+            echo ""
+            echo "SBOMs (SPDX JSON) for both variants are attached to this release."
+          } > release-notes.md
+          {
+            echo "body<<EOF"
+            cat release-notes.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.body.outputs.body }}
+          prerelease: ${{ contains(github.ref, '-') }}
+          files: sboms/*.spdx.json
+          fail_on_unmatched_files: false

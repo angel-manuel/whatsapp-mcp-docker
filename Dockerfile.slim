@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1.7
+
+# Debian-slim variant. Used when the operator needs a shell, ffmpeg for audio
+# transcoding, or other out-of-band debugging. The distroless variant in
+# Dockerfile is the primary/default image; this one trades size for operability.
+
+# ---- Builder -----------------------------------------------------------------
+ARG GO_VERSION=1.24
+FROM golang:${GO_VERSION}-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build \
+      -trimpath -buildvcs=false \
+      -ldflags "-s -w -X main.version=${VERSION}" \
+      -o /out/whatsapp-mcp \
+      ./cmd/whatsapp-mcp
+
+# ---- Runtime -----------------------------------------------------------------
+FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+
+# ffmpeg covers the `send_audio_message` transcode path; ca-certificates is
+# required for TLS to WhatsApp; tini keeps signal forwarding and zombie reaping
+# sane when the image is run with `docker run` without `--init`.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      ffmpeg \
+      tini \
+ && rm -rf /var/lib/apt/lists/*
+
+# Non-root user, UID 1000 to match the distroless variant and ease swapping
+# images on an existing /data volume.
+RUN groupadd --system --gid 1000 whatsapp \
+ && useradd  --system --uid 1000 --gid 1000 --home /data --shell /usr/sbin/nologin whatsapp \
+ && mkdir -p /data && chown 1000:1000 /data
+
+COPY --from=builder /out/whatsapp-mcp /usr/local/bin/whatsapp-mcp
+
+USER 1000:1000
+
+VOLUME ["/data"]
+
+EXPOSE 8081 8082
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["/usr/local/bin/whatsapp-mcp", "--healthcheck"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/whatsapp-mcp"]
