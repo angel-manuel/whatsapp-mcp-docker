@@ -54,6 +54,8 @@ Design-wise the container is also intended to be safely embeddable behind an ext
 
 Each tool's input schema, output shape, and error semantics MUST match the upstream Python reference unless the Go binding surfaces a strictly better type (e.g. typed JID instead of loose strings). Breaking divergences require a note in `CHANGES.md`.
 
+In addition to the parity surface, the Go build exposes 2 native tools — `pairing_start`, `pairing_complete` — for agents that drive pairing through the MCP transport. The admin HTTP SSE endpoints (§Pairing) remain the canonical UI-broker path; the two surfaces are mutually exclusive at the wa layer (`adminMu` + `ErrPairInProgress`). These tools, plus `ping`, are exempt from the `not_paired` gate so that a pre-pair agent can bootstrap itself.
+
 ## Architecture
 
 ```
@@ -89,7 +91,9 @@ Each tool's input schema, output shape, and error semantics MUST match the upstr
 
 ## Pairing
 
-The container MUST expose pairing programmatically so that an external UI can broker it without shipping its own whatsmeow client.
+The container MUST expose pairing programmatically so that an external UI (or an MCP-driven agent) can broker it without shipping its own whatsmeow client. Both surfaces below sit on top of the same `wa.Client.StartPairing` entry point and are mutually exclusive: whichever opens the flow first holds it; the other receives `pair_in_progress` until the flow ends.
+
+### Pairing — admin HTTP
 
 - `POST /admin/pair/start` → opens a Server-Sent Events stream. Event types mirror `whatsmeow.QRChannelItem`:
   - `code`   — rotating pairing payload + `timeout_ms` for UI refresh
@@ -98,7 +102,14 @@ The container MUST expose pairing programmatically so that an external UI can br
 - `POST /admin/pair/phone` with `{ phone }` → returns `{ linking_code }` for phone-number pairing (no QR). Same underlying lifecycle; success/failure events also arrive on `/admin/pair/start` if that stream is open.
 - `POST /admin/unpair` → logs the device out cleanly and deletes `/data/session.db`.
 
-Until pairing succeeds, every MCP tool call MUST return a structured error with a stable code (`not_paired`) so callers can detect and surface a reconnect flow instead of displaying a transport error.
+### Pairing — MCP tools
+
+These two tools target agents that authenticate through the same bearer-token MCP transport (and any auth gateway proxying it). They are exempt from the `not_paired` gate.
+
+- `pairing_start` — input `{ "phone"?: string }`. Without `phone`, opens a QR flow and returns `{ "status": "awaiting_scan", "code": "<raw QR>", "timeout_ms": <int> }`. With `phone`, also requests a phone linking code and returns `{ "status": "awaiting_phone_link", "linking_code": "ABCD-EFGH", "code": "<latest QR>", "timeout_ms": <int> }`. If the first QR has not been emitted within an internal timeout (rare; whatsmeow normally emits within ~1s), the QR-mode response degrades to `{ "status": "pending" }` and the caller should poll `pairing_complete` for the code. Errors: `already_paired`, `pair_in_progress`, `not_pairing` (only when `phone` is supplied — indicates the freshly-opened flow was already torn down by a concurrent unpair), `internal`.
+- `pairing_complete` — input `{ "wait_seconds"?: integer (0..120, default 60) }`. Polls the in-progress flow. `wait_seconds=0` returns the latest cached event without blocking (status snapshot). Otherwise blocks up to `wait_seconds`, coalescing rotation events and returning either a terminal status (`success`, `timeout`, `error`, `client_outdated`, `scanned_without_multidevice`) or `pending` carrying the newest rotation code. `not_pairing` indicates no flow is active. On `success`, the response also carries `jid` and `pushname` from `wa.Status()`.
+
+Until pairing succeeds, every MCP tool call MUST return a structured error with a stable code (`not_paired`), except for `ping`, `pairing_start`, and `pairing_complete` which remain callable pre-pair so agents can detect state and drive the link flow over MCP.
 
 ## Session persistence
 

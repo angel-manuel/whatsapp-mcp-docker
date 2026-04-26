@@ -132,6 +132,19 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
+// exemptFromPairingGate names the tools that must remain callable before
+// the device has been linked. ping is the health check (it is itself
+// designed to report paired:false); pairing_start and pairing_complete
+// drive the link flow and would be useless behind the not_paired gate.
+//
+// Exemption is by name rather than per-tool flag so the policy lives in
+// one transport-level place; tools authoring stays decoupled from it.
+var exemptFromPairingGate = map[string]struct{}{
+	"ping":             {},
+	"pairing_start":    {},
+	"pairing_complete": {},
+}
+
 // buildCore constructs the underlying mcp-go server with the registry
 // and pairing middleware applied. Split out so tests can drive it
 // without spinning up a transport.
@@ -139,7 +152,7 @@ func (s *Server) buildCore() *mcpserver.MCPServer {
 	core := mcpserver.NewMCPServer(
 		s.cfg.Name, s.cfg.Version,
 		mcpserver.WithToolCapabilities(true),
-		mcpserver.WithToolHandlerMiddleware(pairingMiddleware(s.pairing)),
+		mcpserver.WithToolHandlerMiddleware(pairingMiddleware(s.pairing, exemptFromPairingGate)),
 		mcpserver.WithRecovery(),
 	)
 	s.reg.apply(core)

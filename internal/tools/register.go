@@ -52,6 +52,18 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			InputSchema: sendMessageSchema,
 			Handler:     sendMessage(deps),
 		},
+		{
+			Name:        "pairing_start",
+			Description: "Start a WhatsApp pair flow and return the first rotating QR payload. Pass `phone` to also obtain a phone-number linking code. Exempt from the not_paired gate.",
+			InputSchema: pairingStartSchema,
+			Handler:     pairingStart(deps),
+		},
+		{
+			Name:        "pairing_complete",
+			Description: "Poll an in-progress pair flow. Blocks up to wait_seconds (default 60, max 120) for a terminal event; wait_seconds=0 returns the latest cached event without blocking. Exempt from the not_paired gate.",
+			InputSchema: pairingCompleteSchema,
+			Handler:     pairingComplete(deps),
+		},
 	}
 	for _, t := range entries {
 		if err := reg.Register(t); err != nil {

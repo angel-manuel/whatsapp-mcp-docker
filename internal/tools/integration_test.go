@@ -101,6 +101,20 @@ func (m *mockWA) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message
 
 func (m *mockWA) OwnJID() types.JID { return m.ownJID }
 
+// Pairing surface — these tests focus on cache/messaging tools and never
+// drive pairing; the methods return inert defaults so the mock still
+// satisfies tools.WAClient. The pairing-specific tests live in
+// pairing_test.go and use a dedicated fake.
+func (m *mockWA) StartPairing(context.Context) (<-chan wa.PairEvent, error) {
+	return nil, wa.ErrAlreadyPaired
+}
+func (m *mockWA) PairPhone(context.Context, string) (string, error) {
+	return "", wa.ErrNotPairing
+}
+func (m *mockWA) PairLatest() (wa.PairEvent, bool)                       { return wa.PairEvent{}, false }
+func (m *mockWA) PairWaitNext(context.Context) (wa.PairEvent, bool, error) { return wa.PairEvent{}, false, nil }
+func (m *mockWA) Status() wa.Status                                      { return wa.Status{} }
+
 // Confirm the mock satisfies the tools.WAClient interface at compile time.
 var _ tools.WAClient = (*mockWA)(nil)
 
@@ -744,6 +758,40 @@ func TestSendMessage_ValidationErrors(t *testing.T) {
 	}
 }
 
+// TestPairing_ToolsExemptFromNotPairedGate exercises the production
+// pairing_start and pairing_complete handlers through the full MCP
+// transport with NeverPaired in effect. The not_paired middleware
+// would short-circuit non-exempt tools; here we assert the tool's own
+// handler runs (its output may be a different structured error like
+// already_paired or not_pairing depending on the mock state, but
+// crucially NOT not_paired). Pins the exempt-set policy end-to-end
+// against the real tool registrations.
+func TestPairing_ToolsExemptFromNotPairedGate(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, false, nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, name := range []string{"pairing_start", "pairing_complete"} {
+		req := mcpgo.CallToolRequest{}
+		req.Params.Name = name
+		res, err := h.client.CallTool(ctx, req)
+		if err != nil {
+			t.Fatalf("CallTool %s: %v", name, err)
+		}
+		// The handler may legitimately return a structured error
+		// (already_paired / not_pairing) — what matters is that the
+		// not_paired middleware did NOT short-circuit us.
+		if res.IsError {
+			payload, _ := res.StructuredContent.(map[string]any)
+			if code, _ := payload["code"].(string); code == string(mcp.ErrNotPaired) {
+				t.Errorf("%s: middleware short-circuited with not_paired (exemption not in effect)", name)
+			}
+		}
+	}
+}
+
 func TestTools_ListRegisteredToolsAdvertisesSchemas(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, true, nil, nil)
@@ -763,6 +811,8 @@ func TestTools_ListRegisteredToolsAdvertisesSchemas(t *testing.T) {
 		"get_contact_details": false,
 		"get_group_info":      false,
 		"send_message":        false,
+		"pairing_start":       false,
+		"pairing_complete":    false,
 	}
 	for _, tool := range resp.Tools {
 		if _, ok := want[tool.Name]; ok {

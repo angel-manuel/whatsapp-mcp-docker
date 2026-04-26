@@ -93,6 +93,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handlePairStart serves the SSE pair flow. The MCP `pairing_start` tool
+// goes through the same wa.Client.StartPairing entry point, so the two
+// surfaces are mutually exclusive: whichever opens a flow first holds
+// it; the other receives ErrPairInProgress until the flow ends.
 func (s *Server) handlePairStart(w http.ResponseWriter, r *http.Request) {
 	sse, err := newSSEWriter(w)
 	if err != nil {

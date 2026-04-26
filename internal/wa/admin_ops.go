@@ -5,28 +5,72 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 )
 
 // pairSession tracks the lifetime of a /admin/pair/start flow. Only one can
-// be active at a time, guarded by Client.adminMu.
+// be active at a time, guarded by Client.adminMu. After the flow goroutine
+// exits the session is *not* nil-ed out — its observation fields preserve
+// the terminal outcome so callers polling via PairLatest / PairWaitNext
+// after the flow ended still see the result. The next StartPairing or
+// Unpair replaces or clears the pointer.
 type pairSession struct {
 	cancel context.CancelFunc
 	out    chan PairEvent
 	done   chan struct{}
+
+	// Observation state, written by the StartPairing goroutine and read by
+	// PairLatest / PairWaitNext. Independent from `out`, which is owned by
+	// the SSE consumer.
+	obsMu     sync.Mutex
+	obsCond   *sync.Cond
+	obsLatest PairEvent
+	obsSeq    uint64 // 0 means no event yet; bumps on every publish
+	obsDone   bool   // goroutine has exited; no more events will arrive
+}
+
+// isDone reports whether the pair flow goroutine has exited. Once true the
+// session is observation-only.
+func (s *pairSession) isDone() bool {
+	s.obsMu.Lock()
+	defer s.obsMu.Unlock()
+	return s.obsDone
+}
+
+// publish records a new pair event and wakes any waiters. Called from the
+// StartPairing goroutine.
+func (s *pairSession) publish(evt PairEvent) {
+	s.obsMu.Lock()
+	s.obsLatest = evt
+	s.obsSeq++
+	s.obsCond.Broadcast()
+	s.obsMu.Unlock()
+}
+
+// markDone records that the goroutine is exiting and wakes any waiters.
+// Called from a deferred closure in the StartPairing goroutine.
+func (s *pairSession) markDone() {
+	s.obsMu.Lock()
+	s.obsDone = true
+	s.obsCond.Broadcast()
+	s.obsMu.Unlock()
 }
 
 // StartPairing opens a whatsmeow QR channel, connects the client, and returns
 // a channel of typed PairEvents. The caller must cancel ctx (or drain the
 // channel until it closes) to release resources. Only one pair flow may be
-// active at a time.
+// active at a time. Once the flow's goroutine exits, the session pointer is
+// kept on c.pairing so post-terminal observers (PairLatest / PairWaitNext)
+// still see the outcome; it is replaced on the next StartPairing or cleared
+// by Unpair.
 func (c *Client) StartPairing(ctx context.Context) (<-chan PairEvent, error) {
 	c.adminMu.Lock()
 	defer c.adminMu.Unlock()
 
-	if c.pairing != nil {
+	if c.pairing != nil && !c.pairing.isDone() {
 		return nil, ErrPairInProgress
 	}
 
@@ -64,12 +108,14 @@ func (c *Client) StartPairing(ctx context.Context) (<-chan PairEvent, error) {
 		out:    out,
 		done:   make(chan struct{}),
 	}
+	session.obsCond = sync.NewCond(&session.obsMu)
 	c.pairing = session
 
 	go func() {
 		defer close(out)
 		defer close(session.done)
-		defer c.clearPairing(session)
+		defer session.markDone()
+		defer cancel()
 
 		for {
 			select {
@@ -83,6 +129,10 @@ func (c *Client) StartPairing(ctx context.Context) (<-chan PairEvent, error) {
 					return
 				}
 				evt := toPairEvent(item)
+				// Publish before forwarding to the SSE consumer so an
+				// observer waking on the broadcast can read the new event
+				// regardless of whether anything is draining `out`.
+				session.publish(evt)
 				select {
 				case out <- evt:
 				case <-pairCtx.Done():
@@ -98,16 +148,6 @@ func (c *Client) StartPairing(ctx context.Context) (<-chan PairEvent, error) {
 	return out, nil
 }
 
-// clearPairing removes the active pair session pointer if it still matches
-// session. Called from the pairing goroutine on exit.
-func (c *Client) clearPairing(session *pairSession) {
-	c.adminMu.Lock()
-	if c.pairing == session {
-		c.pairing = nil
-	}
-	c.adminMu.Unlock()
-}
-
 // PairPhone requests a phone-code pairing. An active pair flow must already
 // be open (StartPairing handles the prerequisite Connect + QR subscription);
 // success or failure of the overall pair flow is observed on the pair channel
@@ -117,7 +157,7 @@ func (c *Client) PairPhone(ctx context.Context, phone string) (string, error) {
 	pairing := c.pairing
 	c.adminMu.Unlock()
 
-	if pairing == nil {
+	if pairing == nil || pairing.isDone() {
 		return "", ErrNotPairing
 	}
 
