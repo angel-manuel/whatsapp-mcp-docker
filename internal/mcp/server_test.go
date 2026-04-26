@@ -40,6 +40,40 @@ func newTestServer(t *testing.T, transport TransportMode, pairing PairingState) 
 	return srv
 }
 
+// registerFixtureTool adds a no-op tool whose name is *not* in the
+// pairing-gate exempt set so tests can exercise the not_paired
+// short-circuit without depending on any production tool's behaviour.
+func registerFixtureTool(t *testing.T, srv *Server, name string) {
+	t.Helper()
+	if err := srv.Registry().Register(Tool{
+		Name:        name,
+		Description: "Test fixture; never invoked when not paired.",
+		Handler: func(_ context.Context, _ json.RawMessage) (any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+	}); err != nil {
+		t.Fatalf("register fixture tool %q: %v", name, err)
+	}
+}
+
+// registerNoopExemptTool registers a stub under one of the pairing-gate
+// exempt names so the middleware-exemption test can verify the call
+// reaches a handler instead of being short-circuited. The production
+// tools with these names live in internal/tools and would create a
+// package import cycle if pulled in here.
+func registerNoopExemptTool(t *testing.T, srv *Server, name string) {
+	t.Helper()
+	if err := srv.Registry().Register(Tool{
+		Name:        name,
+		Description: "Test stub for pairing-gate exemption.",
+		Handler: func(_ context.Context, _ json.RawMessage) (any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+	}); err != nil {
+		t.Fatalf("register %q: %v", name, err)
+	}
+}
+
 func TestServer_NewValidatesConfig(t *testing.T) {
 	t.Parallel()
 
@@ -127,12 +161,16 @@ func TestStdio_PingRoundtrip(t *testing.T) {
 }
 
 // TestStdio_NotPairedShortCircuits ensures the global middleware
-// intercepts every tool call when pairing is down and returns the
-// structured not_paired error instead of the tool's own output.
+// intercepts every non-exempt tool call when pairing is down and
+// returns the structured not_paired error instead of the tool's own
+// output. ping is exempt (it must report paired:false from the gate's
+// downstream side), so the test registers a fixture tool to exercise
+// the gate.
 func TestStdio_NotPairedShortCircuits(t *testing.T) {
 	t.Parallel()
 
 	srv := newTestServer(t, TransportStdio, NeverPaired)
+	registerFixtureTool(t, srv, "fixture_blocked")
 
 	client, cleanup := stdioClient(t, srv)
 	defer cleanup()
@@ -151,7 +189,7 @@ func TestStdio_NotPairedShortCircuits(t *testing.T) {
 	}
 
 	callReq := mcpgo.CallToolRequest{}
-	callReq.Params.Name = "ping"
+	callReq.Params.Name = "fixture_blocked"
 	result, err := client.CallTool(ctx, callReq)
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -168,6 +206,69 @@ func TestStdio_NotPairedShortCircuits(t *testing.T) {
 	}
 	if got, _ := structured["message"].(string); got != NotPairedMessage {
 		t.Errorf("message=%q, want %q", got, NotPairedMessage)
+	}
+}
+
+// TestStdio_PingExemptFromPairingGate verifies that every name in
+// exemptFromPairingGate (ping, pairing_start, pairing_complete) is
+// reachable pre-pair. The pairing tool names are registered here as
+// no-op stubs because the production tools live in internal/tools,
+// which we cannot import from here without a cycle — but the policy
+// being pinned is "the middleware does not short-circuit these names",
+// not the production tools' bodies. If a future change drops a name
+// from the exempt set this test fails immediately on that name.
+func TestStdio_PingExemptFromPairingGate(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t, TransportStdio, NeverPaired)
+	// Stub the pairing tools so the call dispatches into our handler
+	// (and therefore proves it reached past the middleware) instead of
+	// failing with "tool not found".
+	registerNoopExemptTool(t, srv, "pairing_start")
+	registerNoopExemptTool(t, srv, "pairing_complete")
+
+	client, cleanup := stdioClient(t, srv)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("client.Start: %v", err)
+	}
+	initReq := mcpgo.InitializeRequest{}
+	initReq.Params.ProtocolVersion = mcpgo.LATEST_PROTOCOL_VERSION
+	initReq.Params.ClientInfo = mcpgo.Implementation{Name: "test-client", Version: "0"}
+	if _, err := client.Initialize(ctx, initReq); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	for _, name := range []string{"ping", "pairing_start", "pairing_complete"} {
+		callReq := mcpgo.CallToolRequest{}
+		callReq.Params.Name = name
+		result, err := client.CallTool(ctx, callReq)
+		if err != nil {
+			t.Fatalf("CallTool %s: %v", name, err)
+		}
+		if result.IsError {
+			t.Errorf("%s should bypass not_paired gate, got IsError=true: %+v", name, result)
+		}
+	}
+
+	// Spot-check ping's body is actually reached and reports paired:false
+	// (the canonical use case for keeping ping exempt).
+	pingReq := mcpgo.CallToolRequest{}
+	pingReq.Params.Name = "ping"
+	pingRes, err := client.CallTool(ctx, pingReq)
+	if err != nil {
+		t.Fatalf("CallTool ping: %v", err)
+	}
+	structured, ok := pingRes.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("expected structured map, got %T", pingRes.StructuredContent)
+	}
+	if got := structured["paired"]; got != false {
+		t.Errorf("paired=%v, want false", got)
 	}
 }
 
@@ -273,11 +374,13 @@ func TestHTTP_WrongBearerRejected(t *testing.T) {
 
 // TestHTTP_NotPairedShortCircuits verifies the not_paired pre-handler
 // still runs over HTTP. The call is authenticated but the pairing
-// state reports disconnected.
+// state reports disconnected. ping is exempt, so the test uses a
+// fixture tool to exercise the gate.
 func TestHTTP_NotPairedShortCircuits(t *testing.T) {
 	t.Parallel()
 
 	srv := newTestServer(t, TransportHTTP, NeverPaired)
+	registerFixtureTool(t, srv, "fixture_blocked")
 	ts := httptest.NewServer(srv.HTTPHandler())
 	defer ts.Close()
 
@@ -304,7 +407,7 @@ func TestHTTP_NotPairedShortCircuits(t *testing.T) {
 	}
 
 	callReq := mcpgo.CallToolRequest{}
-	callReq.Params.Name = "ping"
+	callReq.Params.Name = "fixture_blocked"
 	result, err := client.CallTool(ctx, callReq)
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)

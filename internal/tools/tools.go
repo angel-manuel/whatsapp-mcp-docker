@@ -16,6 +16,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
 
 // WAClient is the subset of the whatsmeow surface this package needs. It
@@ -29,6 +30,15 @@ type WAClient interface {
 	ProfilePictureURL(ctx context.Context, jid types.JID) (string, error)
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error)
 	OwnJID() types.JID
+
+	// Pairing surface — used by the pairing_start and pairing_complete
+	// MCP tools. The lifecycle is owned by *wa.Client; this interface
+	// just forwards.
+	StartPairing(ctx context.Context) (<-chan wa.PairEvent, error)
+	PairPhone(ctx context.Context, phone string) (string, error)
+	PairLatest() (wa.PairEvent, bool)
+	PairWaitNext(ctx context.Context) (wa.PairEvent, bool, error)
+	Status() wa.Status
 }
 
 // Deps is the wiring carried into each tool handler. Fields are optional

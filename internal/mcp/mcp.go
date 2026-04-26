@@ -41,6 +41,15 @@ const (
 	// ErrInternal is the catch-all bucket for failures that are not the
 	// caller's fault (DB error, whatsmeow transport error, ...).
 	ErrInternal ErrorCode = "internal"
+	// ErrAlreadyPaired indicates a pair flow was requested but the
+	// device is already linked. Mirrors wa.ErrAlreadyPaired.
+	ErrAlreadyPaired ErrorCode = "already_paired"
+	// ErrPairInProgress indicates another pair flow is already running
+	// (admin SSE or MCP). Mirrors wa.ErrPairInProgress.
+	ErrPairInProgress ErrorCode = "pair_in_progress"
+	// ErrNotPairing indicates the caller asked to drive an in-progress
+	// pair flow but no such flow is active. Mirrors wa.ErrNotPairing.
+	ErrNotPairing ErrorCode = "not_pairing"
 )
 
 // NotPairedMessage is the stable message returned alongside ErrNotPaired.
@@ -208,12 +217,37 @@ func InternalError(message string) *mcpgo.CallToolResult {
 	return ErrorResult(ErrInternal, message)
 }
 
+// AlreadyPairedError is the canonical "device is already paired" error
+// for the pairing tools.
+func AlreadyPairedError(message string) *mcpgo.CallToolResult {
+	return ErrorResult(ErrAlreadyPaired, message)
+}
+
+// PairInProgressError is the canonical "another pair flow is active"
+// error for the pairing tools.
+func PairInProgressError(message string) *mcpgo.CallToolResult {
+	return ErrorResult(ErrPairInProgress, message)
+}
+
+// NotPairingError is the canonical "no active pair flow" error for
+// callers of pairing_complete (and PairPhone via pairing_start).
+func NotPairingError(message string) *mcpgo.CallToolResult {
+	return ErrorResult(ErrNotPairing, message)
+}
+
 // pairingMiddleware short-circuits every tool call with a structured
 // not_paired error when the pairing state reports false. Registered as
 // the outermost middleware so nothing downstream runs pre-pair.
-func pairingMiddleware(state PairingState) mcpserver.ToolHandlerMiddleware {
+//
+// Tools whose names appear in exempt are passed through unconditionally;
+// this is how the pairing tools themselves (and the ping health check)
+// remain callable before the device has been linked.
+func pairingMiddleware(state PairingState, exempt map[string]struct{}) mcpserver.ToolHandlerMiddleware {
 	return func(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 		return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+			if _, ok := exempt[req.Params.Name]; ok {
+				return next(ctx, req)
+			}
 			if state != nil && !state.IsPaired() {
 				return NotPairedError(), nil
 			}

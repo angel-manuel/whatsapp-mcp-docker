@@ -6,6 +6,27 @@ diverges from the upstream Python reference
 must be strictly non-breaking for MCP clients OR justified as a
 "strictly better Go-native type" per REQUIREMENTS.md §"Tool surface".
 
+## Native tools (no upstream equivalent)
+
+The Go build adds tools that the Python reference does not expose. These
+are strictly additive — clients that don't call them see no change.
+
+### `pairing_start` / `pairing_complete`
+
+- **Reference**: pairing is brokered out-of-band; the Python server
+  assumes the device is already linked when MCP clients connect.
+- **Go**: agents that authenticate through the MCP transport can drive
+  the pair flow themselves via two tools — `pairing_start` (opens the
+  flow, returns the first QR payload or, with `phone`, a linking code)
+  and `pairing_complete` (polls/waits for terminal). Both bypass the
+  `not_paired` gate; the admin HTTP SSE endpoints (`/admin/pair/start`,
+  `/admin/pair/phone`) remain available and operate on the same
+  underlying flow (mutually exclusive via `wa.adminMu`).
+- **Why**: REQUIREMENTS.md mandates programmatic pairing behind an
+  external auth/proxy layer; exposing the flow as MCP tools lets that
+  proxy mediate pairing alongside every other tool call without a
+  second transport.
+
 ## Read-side tools (cache-backed)
 
 ### `list_chats` — list wrapped in object

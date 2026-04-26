@@ -65,9 +65,17 @@ reference by path.
 
 ## Pairing
 
-The pair flow is driven entirely through the admin API. There is no QR
-display inside the container; an external orchestrator is expected to stream
-the pair events and present them to the user.
+The pair flow can be driven through either the admin HTTP surface (SSE-based,
+intended for an external UI orchestrator) or the MCP tool surface (intended
+for agents that already authenticate to the MCP transport). Both share the
+same underlying `wa.Client.StartPairing` and are mutually exclusive: whichever
+opens the flow first holds it; the other receives `pair_in_progress` until
+the flow ends.
+
+There is no QR display inside the container; whichever surface drives the
+pair receives the raw rotating code and is responsible for presenting it.
+
+### Via admin HTTP (external UI broker)
 
 ```bash
 ADMIN="http://localhost:8082"
@@ -95,8 +103,28 @@ curl -H "$AUTH" "$ADMIN/admin/status"
 curl -H "$AUTH" -X POST "$ADMIN/admin/unpair"
 ```
 
-Until pairing succeeds every MCP tool call returns a structured `not_paired`
-error so callers can drive the reconnect UI themselves.
+### Via MCP tools (agent-driven)
+
+Agents connected to the MCP transport can drive pairing themselves:
+
+- `pairing_start` — `{ "phone"?: string }` → returns the first rotating QR
+  payload (`{ status: "awaiting_scan", code, timeout_ms }`) or, with
+  `phone`, also a phone linking code (`{ status: "awaiting_phone_link",
+  linking_code, code, timeout_ms }`). If the QR has not arrived within an
+  internal short timeout, the QR-mode response degrades to
+  `{ status: "pending" }` and the agent should poll `pairing_complete`
+  for the code. Structured errors: `already_paired`, `pair_in_progress`,
+  `not_pairing` (only when `phone` is supplied), `internal`.
+- `pairing_complete` — `{ "wait_seconds"?: 0..120 (default 60) }` → polls
+  the in-progress flow. `wait_seconds=0` is a non-blocking status snapshot.
+  Returns either a terminal status (`success`/`timeout`/`error`/…), or
+  `pending` with the latest rotation code so the agent can keep showing it
+  and call again. `not_pairing` indicates no flow is active.
+
+`ping`, `pairing_start`, and `pairing_complete` are exempt from the
+`not_paired` gate; every other MCP tool call returns a structured
+`not_paired` error until pairing succeeds, so callers can drive the
+reconnect UI themselves.
 
 ## Building locally
 
