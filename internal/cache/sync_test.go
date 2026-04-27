@@ -190,10 +190,7 @@ func TestSyncOrchestrator_SecondCallReturnsInProgress(t *testing.T) {
 	close(block)
 
 	deadline := time.After(2 * time.Second)
-	for {
-		if orch.Snapshot().Status != SyncStatusRunning {
-			break
-		}
+	for orch.Snapshot().Status == SyncStatusRunning {
 		select {
 		case <-deadline:
 			t.Fatal("sync did not finish after unblock")

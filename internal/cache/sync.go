@@ -20,6 +20,10 @@ type SyncStatus string
 // StageStatus is the per-stage state inside a sync run.
 type StageStatus string
 
+// SyncStatus / StageStatus values. Idle / Pending mean "not yet started";
+// Running is in-flight; Done is successful completion; Failed is an
+// error path. Stages never sit in Skipped today (continue-on-failure
+// runs every stage even if a previous one errored).
 const (
 	SyncStatusIdle    SyncStatus = "idle"
 	SyncStatusRunning SyncStatus = "running"
