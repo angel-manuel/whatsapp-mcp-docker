@@ -140,6 +140,12 @@ jobs:
       - name: Download SBOM artifacts
         uses: actions/download-artifact@v4
         with:
+          # Only the SBOM artifacts; without this filter, download-artifact
+          # also tries to fetch the buildx-internal `*.dockerbuild` provenance
+          # blobs that build-push-action@v6 auto-attaches when `provenance:
+          # true`, and one of those occasionally fails to download — failing
+          # the whole job even though the images and SBOMs are fine.
+          pattern: sbom-*
           path: sboms
           merge-multiple: true
 
