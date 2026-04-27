@@ -4,7 +4,6 @@ go 1.24.0
 
 require (
 	github.com/mark3labs/mcp-go v0.48.0
-	github.com/mattn/go-sqlite3 v1.14.32
 	go.mau.fi/whatsmeow v0.0.0-20251203212742-364369929a75
 	google.golang.org/protobuf v1.36.10
 	modernc.org/sqlite v1.38.0

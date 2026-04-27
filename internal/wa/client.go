@@ -10,13 +10,14 @@ import (
 	"sync"
 	"sync/atomic"
 
-	// Register the CGO SQLite driver under the name "sqlite3" so that
-	// whatsmeow's sqlstore can open it.
-	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
+
+	// Register the pure-Go SQLite driver under the name "sqlite" so that
+	// whatsmeow's sqlstore can open it without a cgo runtime.
+	_ "modernc.org/sqlite"
 )
 
 // DefaultDataDir is used when Config.DataDir is empty.
@@ -160,7 +161,7 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 // c.mu; openWhatsmeow does not touch c.state or c.stopReconnect.
 func (c *Client) openWhatsmeow(ctx context.Context) error {
 	dsn := sessionDSN(c.cfg.DataDir)
-	container, err := sqlstore.New(ctx, "sqlite3", dsn, c.log)
+	container, err := sqlstore.New(ctx, "sqlite", dsn, c.log)
 	if err != nil {
 		return fmt.Errorf("open sqlstore: %w", err)
 	}
@@ -299,8 +300,8 @@ func (c *Client) Status() Status {
 
 func sessionDSN(dir string) string {
 	q := url.Values{}
-	q.Set("_foreign_keys", "on")
-	q.Set("_journal_mode", "WAL")
-	q.Set("_busy_timeout", "5000")
+	q.Add("_pragma", "foreign_keys(on)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "busy_timeout(5000)")
 	return "file:" + filepath.Join(dir, "session.db") + "?" + q.Encode()
 }
