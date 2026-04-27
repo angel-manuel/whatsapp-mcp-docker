@@ -49,7 +49,7 @@ func (f *fakeWA) Subscribe() (<-chan wa.Event, func()) {
 	return ch, func() {}
 }
 
-func (f *fakeWA) StartPairing(ctx context.Context) (<-chan wa.PairEvent, error) {
+func (f *fakeWA) StartPairing(ctx context.Context, _ string) (<-chan wa.PairEvent, error) {
 	if f.startPairFn != nil {
 		return f.startPairFn(ctx)
 	}

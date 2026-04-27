@@ -34,7 +34,7 @@ type WAClient interface {
 	// Pairing surface — used by the pairing_start and pairing_complete
 	// MCP tools. The lifecycle is owned by *wa.Client; this interface
 	// just forwards.
-	StartPairing(ctx context.Context) (<-chan wa.PairEvent, error)
+	StartPairing(ctx context.Context, deviceName string) (<-chan wa.PairEvent, error)
 	PairPhone(ctx context.Context, phone string) (string, error)
 	PairLatest() (wa.PairEvent, bool)
 	PairWaitNext(ctx context.Context) (wa.PairEvent, bool, error)

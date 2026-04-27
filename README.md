@@ -56,7 +56,7 @@ Operators typically only care about these:
 | `DATA_DIR` | `/data` | Persistent state directory. |
 | `AUTH_TOKEN` | *(unset)* | Bearer token required by MCP HTTP + every admin route except `/admin/health`. |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | If all three are set, client mTLS replaces `AUTH_TOKEN`. |
-| `PAIR_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
+| `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error`. |
 | `LOG_FORMAT` | `json` | `json` or `text`. |
 

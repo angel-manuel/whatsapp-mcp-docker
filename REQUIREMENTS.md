@@ -147,7 +147,7 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 | `LOG_FORMAT` | `json` | `json` or `text` |
 | `AUTH_TOKEN` | *(unset)* | Required bearer token for HTTP MCP + admin. REQUIRED in `http` mode. |
 | `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | If all three are set, requires client mTLS and ignores `AUTH_TOKEN`. |
-| `PAIR_DEVICE_NAME` | `whatsapp-mcp` | Shown on the user's phone after pairing. |
+| `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Shown on the user's phone after pairing. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Used by `send_audio_message`; absent → audio conversion disabled, Opus input required. |
 | `ENABLE_PPROF` | `false` | Exposes `/debug/pprof` on the admin port when true. |
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
 )
 
 // pairSession tracks the lifetime of a /admin/pair/start flow. Only one can
@@ -66,7 +67,10 @@ func (s *pairSession) markDone() {
 // kept on c.pairing so post-terminal observers (PairLatest / PairWaitNext)
 // still see the outcome; it is replaced on the next StartPairing or cleared
 // by Unpair.
-func (c *Client) StartPairing(ctx context.Context) (<-chan PairEvent, error) {
+//
+// deviceName overrides the label shown on the user's phone. Empty string falls
+// back to the configured default (WHATSAPP_DEVICE_NAME / "whatsapp-mcp").
+func (c *Client) StartPairing(ctx context.Context, deviceName string) (<-chan PairEvent, error) {
 	c.adminMu.Lock()
 	defer c.adminMu.Unlock()
 
@@ -82,6 +86,15 @@ func (c *Client) StartPairing(ctx context.Context) (<-chan PairEvent, error) {
 	if device != nil && device.ID != nil {
 		return nil, ErrAlreadyPaired
 	}
+
+	// Apply device name cascade: configured default → per-call override.
+	// adminMu serializes StartPairing calls so mutating the package-level
+	// store.DeviceProps is safe here.
+	effectiveName := c.cfg.PairDeviceName
+	if deviceName != "" {
+		effectiveName = deviceName
+	}
+	store.DeviceProps.Os = &effectiveName
 
 	// GetQRChannel must be called before Connect and requires that the
 	// store contain no user ID (both guaranteed above).

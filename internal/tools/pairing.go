@@ -20,6 +20,10 @@ var pairingStartSchema = json.RawMessage(`{
     "phone": {
       "type": "string",
       "description": "Optional E.164 phone number (digits only, no '+'). When set, returns a phone linking code in addition to the rotating QR payload."
+    },
+    "device_name": {
+      "type": "string",
+      "description": "Override the label shown on the user's phone after pairing. Defaults to the WHATSAPP_DEVICE_NAME env var or 'whatsapp-mcp'."
     }
   },
   "additionalProperties": false
@@ -84,7 +88,8 @@ const firstEventTimeout = 5 * time.Second
 func pairingStart(deps Deps) mcp.Handler {
 	return func(ctx context.Context, args json.RawMessage) (any, error) {
 		var in struct {
-			Phone string `json:"phone,omitempty"`
+			Phone      string `json:"phone,omitempty"`
+			DeviceName string `json:"device_name,omitempty"`
 		}
 		if err := decodeArgs(args, &in); err != nil {
 			return mcp.InvalidArgumentError(err.Error()), nil
@@ -94,7 +99,7 @@ func pairingStart(deps Deps) mcp.Handler {
 		// (subsequent pairing_complete calls drain it). Using
 		// context.Background() here is deliberate; teardown is owned
 		// by wa.Client (terminal event or Unpair).
-		ch, err := deps.WA.StartPairing(context.Background())
+		ch, err := deps.WA.StartPairing(context.Background(), in.DeviceName)
 		if err != nil {
 			switch {
 			case errors.Is(err, wa.ErrAlreadyPaired):
@@ -114,7 +119,7 @@ func pairingStart(deps Deps) mcp.Handler {
 		// the channel; it exits when wa closes it on terminal/cancel.
 		if ch != nil {
 			go func() {
-				for range ch {
+				for range ch { //nolint:revive // intentional no-op drain
 				}
 			}()
 		}

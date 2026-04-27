@@ -59,7 +59,7 @@ func Load() (*Config, error) {
 		MTLSCAFile:       os.Getenv("MTLS_CA_FILE"),
 		MTLSCertFile:     os.Getenv("MTLS_CERT_FILE"),
 		MTLSKeyFile:      os.Getenv("MTLS_KEY_FILE"),
-		PairDeviceName:   getEnv("PAIR_DEVICE_NAME", "whatsapp-mcp"),
+		PairDeviceName:   getEnv("WHATSAPP_DEVICE_NAME", "whatsapp-mcp"),
 		FFmpegPath:       getEnv("FFMPEG_PATH", "/usr/bin/ffmpeg"),
 	}
 
