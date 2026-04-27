@@ -7,6 +7,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -346,4 +347,177 @@ func TestHandleEvent_IgnoresUnknown(t *testing.T) {
 	// A random struct should be silently ignored (no panic, no error).
 	ingest.HandleEvent(struct{ X int }{X: 1})
 	ingest.HandleEvent(nil)
+}
+
+func TestHandleEvent_JoinedGroup_PersistsAsGroup(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "120363000000000001@g.us")
+	evt := &events.JoinedGroup{
+		Reason: "invite",
+		Type:   "new",
+		GroupInfo: types.GroupInfo{
+			JID:       jid,
+			GroupName: types.GroupName{Name: "Weekend Plans"},
+		},
+	}
+	ingest.HandleEvent(evt)
+
+	var name, chatType string
+	var isGroup int
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT name, is_group, chat_type FROM chats WHERE jid = ?`,
+		jid.String()).Scan(&name, &isGroup, &chatType); err != nil {
+		t.Fatalf("scan chat: %v", err)
+	}
+	if name != "Weekend Plans" || isGroup != 1 || chatType != "group" {
+		t.Fatalf("got name=%q is_group=%d chat_type=%q", name, isGroup, chatType)
+	}
+}
+
+func TestHandleEvent_JoinedGroup_CommunityParent(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "120363000000000002@g.us")
+	evt := &events.JoinedGroup{
+		Type: "new",
+		GroupInfo: types.GroupInfo{
+			JID:         jid,
+			GroupName:   types.GroupName{Name: "Neighborhood"},
+			GroupParent: types.GroupParent{IsParent: true},
+		},
+	}
+	ingest.HandleEvent(evt)
+
+	var chatType string
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT chat_type FROM chats WHERE jid = ?`, jid.String()).Scan(&chatType); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if chatType != "community" {
+		t.Fatalf("chat_type = %q, want community", chatType)
+	}
+}
+
+func TestHandleEvent_NewsletterJoin_PersistsAsNewsletter(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "120363000000000003@newsletter")
+	meta := types.NewsletterMetadata{ID: jid}
+	meta.ThreadMeta.Name = types.NewsletterText{Text: "Daily Brief"}
+	evt := &events.NewsletterJoin{NewsletterMetadata: meta}
+	ingest.HandleEvent(evt)
+
+	var name, chatType string
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT name, chat_type FROM chats WHERE jid = ?`, jid.String()).Scan(&name, &chatType); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if name != "Daily Brief" || chatType != "newsletter" {
+		t.Fatalf("got name=%q chat_type=%q", name, chatType)
+	}
+}
+
+func TestHandleEvent_MarkChatAsRead_SetsUnread(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "1234567890@s.whatsapp.net")
+	read := false
+	evt := &events.MarkChatAsRead{
+		JID:    jid,
+		Action: &waSyncAction.MarkChatAsReadAction{Read: &read},
+	}
+	ingest.HandleEvent(evt)
+
+	var unread int
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT unread_count FROM chats WHERE jid = ?`, jid.String()).Scan(&unread); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if unread != 1 {
+		t.Fatalf("unread_count = %d, want 1", unread)
+	}
+}
+
+func TestHandleEvent_Pin_SetsPinned(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "120363000000000004@g.us")
+	pinned := true
+	evt := &events.Pin{
+		JID:    jid,
+		Action: &waSyncAction.PinAction{Pinned: &pinned},
+	}
+	ingest.HandleEvent(evt)
+
+	var p, isGroup int
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT pinned, is_group FROM chats WHERE jid = ?`, jid.String()).Scan(&p, &isGroup); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if p != 1 || isGroup != 1 {
+		t.Fatalf("got pinned=%d is_group=%d", p, isGroup)
+	}
+}
+
+func TestHandleEvent_Archive_SetsArchived(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "9999999999@s.whatsapp.net")
+	archived := true
+	evt := &events.Archive{
+		JID:    jid,
+		Action: &waSyncAction.ArchiveChatAction{Archived: &archived},
+	}
+	ingest.HandleEvent(evt)
+
+	var a int
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT archived FROM chats WHERE jid = ?`, jid.String()).Scan(&a); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if a != 1 {
+		t.Fatalf("archived = %d, want 1", a)
+	}
+}
+
+// Pre-seed a chat with a known name and ensure that a partial-info appstate
+// event (Pin) leaves the existing name intact.
+func TestHandleEvent_AppState_DoesNotClobberExistingName(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "120363000000000005@g.us")
+	if err := store.UpsertChat(context.Background(), Chat{
+		JID:     jid.String(),
+		Name:    "Existing",
+		IsGroup: true,
+		Type:    ChatTypeGroup,
+	}); err != nil {
+		t.Fatalf("seed UpsertChat: %v", err)
+	}
+
+	pinned := true
+	ingest.HandleEvent(&events.Pin{JID: jid, Action: &waSyncAction.PinAction{Pinned: &pinned}})
+
+	var name, chatType string
+	var p int
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT name, chat_type, pinned FROM chats WHERE jid = ?`, jid.String()).Scan(&name, &chatType, &p); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if name != "Existing" || chatType != "group" || p != 1 {
+		t.Fatalf("got name=%q chat_type=%q pinned=%d", name, chatType, p)
+	}
+}
+
+func TestHandleEvent_BumpsLastEventTimestamp(t *testing.T) {
+	ingest, _ := newTestIngestor(t)
+	if !ingest.LastEventAt().IsZero() {
+		t.Fatalf("expected zero LastEventAt before any event")
+	}
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	ingest.HandleEvent(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: chat},
+			ID:            "wamid.TS",
+			Timestamp:     time.Unix(1_700_000_000, 0).UTC(),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hi")},
+	})
+	if ingest.LastEventAt().IsZero() {
+		t.Fatalf("expected LastEventAt to advance after a Message event")
+	}
 }
