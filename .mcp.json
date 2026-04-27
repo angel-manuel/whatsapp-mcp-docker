@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "whatsapp": {
+      "type": "http",
+      "url": "http://localhost:8081/mcp",
+      "headers": {
+        "Authorization": "Bearer ${WHATSAPP_MCP_AUTH_TOKEN}"
+      }
+    }
+  }
+}
