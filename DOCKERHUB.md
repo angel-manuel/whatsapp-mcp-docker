@@ -22,7 +22,7 @@ Source, full docs, and changelog:
 |---|---|---|
 | `latest` | distroless/static, non-root, no shell | **Default.** Smallest, hardest to misuse. |
 | `latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You need `send_audio_message` to transcode arbitrary input to Opus, or want a shell for triage. |
-| `vX.Y.Z`, `vX.Y.Z-slim` | (as above) | Immutable per-release pins. **Pin by digest in production.** |
+| `X.Y.Z`, `X.Y.Z-slim` | (as above) | Immutable per-release pins (no `v` prefix — Docker tag convention). **Pin by digest in production.** |
 
 Both variants are multi-arch: `linux/amd64`, `linux/arm64`.
 

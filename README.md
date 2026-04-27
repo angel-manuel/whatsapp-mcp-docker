@@ -145,8 +145,9 @@ Published to Docker Hub on every release tag:
 | `angelmanuel/whatsapp-mcp:latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You need `send_audio_message` to transcode arbitrary input to Opus, or you want a shell for triage. |
 
 Both are multi-arch (`linux/amd64`, `linux/arm64`). Each release also
-publishes immutable `:vX.Y.Z` and `:vX.Y.Z-slim` tags plus sha256
-digests in the GitHub release notes — **pin by digest in production.**
+publishes immutable `:X.Y.Z` and `:X.Y.Z-slim` tags (no `v` prefix —
+Docker tag convention) plus sha256 digests in the GitHub release
+notes — **pin by digest in production.**
 
 ## Configuration
 
@@ -246,7 +247,7 @@ git push origin v0.1.0
 ```
 
 The `release` GitHub Actions workflow builds both image variants for
-`linux/amd64` + `linux/arm64`, pushes `vX.Y.Z`, `vX.Y.Z-slim`, and (for
+`linux/amd64` + `linux/arm64`, pushes `X.Y.Z`, `X.Y.Z-slim`, and (for
 non-prerelease tags) `latest` / `latest-slim` to Docker Hub, and
 attaches SPDX SBOMs (via `syft`) plus the immutable digests to the
 GitHub release.
