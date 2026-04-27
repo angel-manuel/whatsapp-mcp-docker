@@ -25,3 +25,6 @@ coverage.html
 *.swp
 *.swo
 .DS_Store
+
+# Local env (direnv)
+.envrc
