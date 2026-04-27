@@ -41,40 +41,81 @@ _Demo video coming soon — Claude Code calling `list_chats`, `list_messages`, a
 
 ---
 
-## Quick start (5 minutes)
+## Quick start
 
-You need: Docker, a phone with WhatsApp, and Claude Code (or any MCP
-client that supports HTTP transport).
+You need: Docker, a phone with WhatsApp, and Claude Code.
 
 ### 1. Run the container
 
 ```bash
 mkdir -p ~/whatsapp-mcp/data
-export WHATSAPP_MCP_AUTH_TOKEN=$(openssl rand -hex 32)
+( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/data/.auth_token )
 
 docker run -d \
   --name whatsapp-mcp \
   --restart unless-stopped \
-  -p 8081:8081 -p 8082:8082 \
+  -p 8081:8081 \
   -v ~/whatsapp-mcp/data:/data \
-  -e AUTH_TOKEN="$WHATSAPP_MCP_AUTH_TOKEN" \
+  -e AUTH_TOKEN="$(cat ~/whatsapp-mcp/data/.auth_token)" \
   docker.io/angelmanuel/whatsapp-mcp:latest
 ```
 
-Save the token somewhere persistent — Claude Code needs it, and you'll
-lose it from the shell on logout. A common pattern:
+`8081` is the MCP transport. The admin port (`8082`) stays inside the
+container by default — bind it explicitly only if you want to drive
+pairing from the host (see [Pair from the host](#pair-from-the-host-optional)
+below).
+
+### 2. Configure the MCP in Claude Code
 
 ```bash
-echo "$WHATSAPP_MCP_AUTH_TOKEN" > ~/whatsapp-mcp/data/.auth_token
-chmod 600 ~/whatsapp-mcp/data/.auth_token
+claude mcp add --transport http whatsapp http://localhost:8081/mcp \
+  --header "Authorization: Bearer $(cat ~/whatsapp-mcp/data/.auth_token)" \
+  --scope user
 ```
 
-### 2. Pair your phone
+Restart Claude Code, run `/mcp`, and `whatsapp` should be listed.
 
-The simplest path is to render the QR in your terminal:
+Then just **ask Claude to pair the device.** It calls `pairing_start`
+through MCP and walks you through it. Phone-number linking is the
+smoothest path in chat:
+
+```
+> Pair my WhatsApp using phone number +15551234567
+```
+
+Claude calls `pairing_start({phone: "+15551234567"})`, hands you back
+the 8-character linking code, and you enter it in
+WhatsApp → Linked devices → **Link with phone number**. Claude polls
+`pairing_complete` until the link succeeds; the session then survives
+container restarts (everything lives under `/data`).
+
+For a project-scoped config (committed alongside a repo), use
+`--scope project` instead — `claude mcp add` writes to `./.mcp.json`.
+Don't commit the token; the env-var form `Bearer ${WHATSAPP_MCP_AUTH_TOKEN}`
+in `.mcp.json` works once you export the variable in the shell that
+launches Claude Code.
+
+> 💡 **Claude Desktop?** Claude Desktop only speaks **stdio** MCP, not
+> HTTP. Run the container with `-e TRANSPORT=stdio` and wrap it with a
+> stdio-bridging launcher (or just use Claude Code, which speaks HTTP
+> natively).
+
+### Pair from the host (optional)
+
+If you'd rather render the QR in your terminal — useful when Claude
+Code isn't running yet, or when you want a visual scan instead of a
+linking code — bind the admin port to loopback when you start the
+container:
 
 ```bash
-# Install qrencode once: `brew install qrencode` or `apt install qrencode`.
+# Add this to the docker run above:
+  -p 127.0.0.1:8082:8082 \
+```
+
+Then stream the rotating pair payload and render it as a QR (needs
+`qrencode`: `brew install qrencode` / `apt install qrencode`):
+
+```bash
 TOKEN=$(cat ~/whatsapp-mcp/data/.auth_token)
 curl -sN -H "Authorization: Bearer $TOKEN" \
      -X POST http://localhost:8082/admin/pair/start \
@@ -89,71 +130,8 @@ curl -sN -H "Authorization: Bearer $TOKEN" \
   done
 ```
 
-Or, if you'd rather not script it, this repo's `Makefile` has a
-ready-made target — `make pair-qr` does exactly this against the running
-container.
-
-Prefer phone-number linking? Replace the curl above with:
-
-```bash
-curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-     -X POST http://localhost:8082/admin/pair/phone \
-     -d '{"phone":"+15551234567"}'
-# → { "linking_code": "ABCD-EFGH" }
-# Enter that code in WhatsApp → Linked devices → Link with phone number.
-```
-
-Pairing state survives container restarts — `/data` holds the session.
-
-### 3. Wire it into Claude Code
-
-The fastest way (Claude Code 0.x and later):
-
-```bash
-claude mcp add --transport http whatsapp http://localhost:8081/mcp \
-  --header "Authorization: Bearer $WHATSAPP_MCP_AUTH_TOKEN" \
-  --scope user
-```
-
-That's it — restart Claude Code and `whatsapp` shows up in `/mcp`.
-
-If you'd rather check the file in to a project (so a teammate cloning
-the repo gets the same wiring), use `--scope project` instead. That
-writes to `./.mcp.json`. Don't bake the token into a committed file;
-reference an env var:
-
-```json
-{
-  "mcpServers": {
-    "whatsapp": {
-      "type": "http",
-      "url": "http://localhost:8081/mcp",
-      "headers": {
-        "Authorization": "Bearer ${WHATSAPP_MCP_AUTH_TOKEN}"
-      }
-    }
-  }
-}
-```
-
-Then export `WHATSAPP_MCP_AUTH_TOKEN` in the shell that launches Claude
-Code (e.g. via direnv or your shell rc).
-
-> 💡 **Claude Desktop?** Claude Desktop only speaks **stdio** MCP, not
-> HTTP. Run the container with `-e TRANSPORT=stdio` and wrap it with a
-> stdio-bridging launcher (or just use Claude Code, which speaks HTTP
-> natively).
-
-### 4. Try it
-
-In Claude Code:
-
-```
-> What were my last 5 WhatsApp messages?
-```
-
-Claude calls `list_messages`, returns the cached results, and offers to
-reply.
+The `Makefile` ships a ready-made `make pair-qr` target that does
+exactly this against the running container.
 
 ---
 
