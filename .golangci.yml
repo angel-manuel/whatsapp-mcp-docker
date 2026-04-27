@@ -39,6 +39,11 @@ linters:
         - name: unreachable-code
         - name: redefines-builtin-id
   exclusions:
+    # Restore v1's default exclusions (Close()/Fprint*/etc.); v2 drops them.
+    presets:
+      - common-false-positives
+      - std-error-handling
+      - legacy
     paths:
       - reference
       - bin
