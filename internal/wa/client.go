@@ -10,11 +10,14 @@ import (
 	"sync"
 	"sync/atomic"
 
-	_ "modernc.org/sqlite"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
+
+	// Register the pure-Go SQLite driver under the name "sqlite" so that
+	// whatsmeow's sqlstore can open it without a cgo runtime.
+	_ "modernc.org/sqlite"
 )
 
 // DefaultDataDir is used when Config.DataDir is empty.
