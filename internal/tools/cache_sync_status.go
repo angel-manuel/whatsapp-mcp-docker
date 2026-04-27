@@ -23,8 +23,8 @@ type CacheSyncStatus struct {
 	ChatCount       int `json:"chat_count"`
 	MessageCount    int `json:"message_count"`
 	ContactCount    int `json:"contact_count"`
-	LastEventAt     any `json:"last_event_at"`           // ISO-8601 string | null
-	LastEventAgoSec any `json:"last_event_ago_seconds"`  // integer  | null
+	LastEventAt     any `json:"last_event_at"`          // ISO-8601 string | null
+	LastEventAgoSec any `json:"last_event_ago_seconds"` // integer  | null
 }
 
 func cacheSyncStatus(deps Deps) mcp.Handler {

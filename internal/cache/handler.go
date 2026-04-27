@@ -314,17 +314,17 @@ func (i *Ingestor) handleJoinedGroup(ctx context.Context, evt *events.JoinedGrou
 		return
 	}
 	chatType := ChatTypeGroup
-	if evt.GroupParent.IsParent {
+	if evt.IsParent {
 		chatType = ChatTypeCommunity
 	}
 	chat := Chat{
 		JID:     evt.JID.String(),
 		IsGroup: true,
 		Type:    chatType,
-		Name:    evt.GroupName.Name,
+		Name:    evt.Name,
 	}
-	if !evt.GroupName.NameSetAt.IsZero() {
-		chat.LastMessageTS = evt.GroupName.NameSetAt
+	if !evt.NameSetAt.IsZero() {
+		chat.LastMessageTS = evt.NameSetAt
 	}
 	if err := i.store.UpsertChat(ctx, chat); err != nil {
 		i.logger.Warn("cache: joined group event", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))

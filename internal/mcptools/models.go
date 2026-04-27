@@ -8,7 +8,7 @@ type ChatDTO struct {
 	JID             string `json:"jid"`
 	Name            any    `json:"name"` // string | null
 	IsGroup         bool   `json:"is_group"`
-	ChatType        string `json:"chat_type"` // "direct" | "group" | "newsletter" | "community"
+	ChatType        string `json:"chat_type"`         // "direct" | "group" | "newsletter" | "community"
 	LastMessageTime any    `json:"last_message_time"` // ISO-8601 string | null
 	LastMessage     any    `json:"last_message"`      // string | null
 	LastMessageID   any    `json:"last_message_id"`   // string | null

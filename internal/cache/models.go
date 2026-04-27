@@ -9,6 +9,9 @@ import (
 // community parents. Stored as TEXT in the chats.chat_type column.
 type ChatType string
 
+// Recognized values for the chats.chat_type column. Newsletters are the
+// @newsletter JID family; community is the parent of a hub of subgroups
+// (subgroups themselves are still ChatTypeGroup).
 const (
 	ChatTypeDirect     ChatType = "direct"
 	ChatTypeGroup      ChatType = "group"
@@ -18,9 +21,9 @@ const (
 
 // Chat mirrors the chats table row used by upserts.
 type Chat struct {
-	JID           string
-	Name          string
-	IsGroup       bool
+	JID     string
+	Name    string
+	IsGroup bool
 	// Type, when non-empty, sets chat_type. Empty falls back to deriveChatType
 	// from JID + IsGroup, so callers that don't care about the discriminator
 	// (e.g. handleMessage) can leave it zero.
