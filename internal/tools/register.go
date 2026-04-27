@@ -20,6 +20,9 @@ func Register(reg *mcp.Registry, deps Deps) error {
 	if deps.WA == nil {
 		return errors.New("tools: Deps.WA is required")
 	}
+	if deps.Sync == nil {
+		return errors.New("tools: Deps.Sync is required")
+	}
 
 	entries := []mcp.Tool{
 		{
@@ -66,9 +69,15 @@ func Register(reg *mcp.Registry, deps Deps) error {
 		},
 		{
 			Name:        "cache_sync_status",
-			Description: "Diagnostic snapshot of the local cache: chat / message / contact counts and the timestamp of the most recent ingested whatsmeow event. Exempt from the not_paired gate; safe to call before linking.",
+			Description: "Diagnostic snapshot of the local cache: chat / message / contact counts, the timestamp of the most recent ingested whatsmeow event, and the most recent (or in-progress) sync run. Exempt from the not_paired gate; safe to call before linking.",
 			InputSchema: cacheSyncStatusSchema,
 			Handler:     cacheSyncStatus(deps),
+		},
+		{
+			Name:        "cache_sync",
+			Description: "Trigger reconciliation of the local cache against authoritative whatsmeow endpoints (joined groups, subscribed newsletters, app state). Returns immediately with a sync_id; per-stage progress is reported by cache_sync_status.",
+			InputSchema: cacheSyncSchema,
+			Handler:     cacheSyncHandler(deps),
 		},
 	}
 	for _, t := range entries {
