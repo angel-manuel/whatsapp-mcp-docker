@@ -1,3 +1,5 @@
+// Command whatsapp-mcp is the binary entry point: it loads config from env,
+// constructs the Server, and runs it until SIGINT/SIGTERM.
 package main
 
 import (
