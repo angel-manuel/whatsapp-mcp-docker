@@ -61,6 +61,9 @@ func (c *Client) dispatch() {
 			return
 		case raw := <-c.rawCh:
 			c.handle(raw)
+			if hook := c.cfg.EventHook; hook != nil {
+				hook(raw)
+			}
 		}
 	}
 }
