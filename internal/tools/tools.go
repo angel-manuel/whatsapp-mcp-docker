@@ -44,6 +44,7 @@ type WAClient interface {
 // Deps is the wiring carried into each tool handler. Fields are optional
 // at the struct level but individual tools document which they require.
 type Deps struct {
-	Cache *cache.Store
-	WA    WAClient
+	Cache    *cache.Store
+	WA       WAClient
+	Ingestor *cache.Ingestor // optional; cache_sync_status reads its heartbeat
 }

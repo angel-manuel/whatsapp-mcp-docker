@@ -1,17 +1,54 @@
 package cache
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// ChatType discriminates direct chats, regular groups, newsletters, and
+// community parents. Stored as TEXT in the chats.chat_type column.
+type ChatType string
+
+// Recognized values for the chats.chat_type column. Newsletters are the
+// @newsletter JID family; community is the parent of a hub of subgroups
+// (subgroups themselves are still ChatTypeGroup).
+const (
+	ChatTypeDirect     ChatType = "direct"
+	ChatTypeGroup      ChatType = "group"
+	ChatTypeNewsletter ChatType = "newsletter"
+	ChatTypeCommunity  ChatType = "community"
+)
 
 // Chat mirrors the chats table row used by upserts.
 type Chat struct {
-	JID           string
-	Name          string
-	IsGroup       bool
+	JID     string
+	Name    string
+	IsGroup bool
+	// Type, when non-empty, sets chat_type. Empty falls back to deriveChatType
+	// from JID + IsGroup, so callers that don't care about the discriminator
+	// (e.g. handleMessage) can leave it zero.
+	Type          ChatType
 	LastMessageTS time.Time
 	UnreadCount   int
 	Archived      bool
 	Pinned        bool
 	MutedUntil    time.Time
+}
+
+// deriveChatType infers chat_type from JID suffix + is_group when the caller
+// did not set it explicitly. JIDs ending in @newsletter map to newsletter,
+// any other group-flagged row to group, everything else to direct. Community
+// parents must be set explicitly via Chat.Type by handlers that have the
+// metadata (handleJoinedGroup uses GroupParent.IsParent).
+func deriveChatType(jid string, isGroup bool) ChatType {
+	switch {
+	case strings.HasSuffix(jid, "@newsletter"):
+		return ChatTypeNewsletter
+	case isGroup:
+		return ChatTypeGroup
+	default:
+		return ChatTypeDirect
+	}
 }
 
 // Contact mirrors the contacts table row used by upserts.

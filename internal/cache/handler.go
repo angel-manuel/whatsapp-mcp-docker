@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -19,8 +20,20 @@ import (
 // `whatsmeow.Client.AddEventHandler` as well as forwarded to from an internal
 // lifecycle dispatcher without wrapping.
 type Ingestor struct {
-	store  *Store
-	logger *slog.Logger
+	store       *Store
+	logger      *slog.Logger
+	lastEventTS atomic.Int64 // unix seconds of the most recent recognized event
+}
+
+// LastEventAt returns the timestamp of the last successfully ingested event,
+// or zero time when none has been seen. Used by the cache_sync_status tool
+// to expose a freshness heartbeat.
+func (i *Ingestor) LastEventAt() time.Time {
+	sec := i.lastEventTS.Load()
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0).UTC()
 }
 
 // NewIngestor constructs an Ingestor backed by store. A nil logger is replaced
@@ -39,6 +52,7 @@ func NewIngestor(store *Store, logger *slog.Logger) *Ingestor {
 // `whatsmeow.Client.AddEventHandler`.
 func (i *Ingestor) HandleEvent(evt any) {
 	ctx := context.Background()
+	recognized := true
 	switch v := evt.(type) {
 	case *events.Message:
 		i.handleMessage(ctx, v)
@@ -52,6 +66,25 @@ func (i *Ingestor) HandleEvent(evt any) {
 		i.handleBusinessName(ctx, v)
 	case *events.GroupInfo:
 		i.handleGroupInfo(ctx, v)
+	case *events.JoinedGroup:
+		i.handleJoinedGroup(ctx, v)
+	case *events.NewsletterJoin:
+		i.handleNewsletterJoin(ctx, v)
+	case *events.NewsletterLeave:
+		i.handleNewsletterLeave(ctx, v)
+	case *events.MarkChatAsRead:
+		i.handleMarkChatAsRead(ctx, v)
+	case *events.Pin:
+		i.handlePin(ctx, v)
+	case *events.Archive:
+		i.handleArchive(ctx, v)
+	case *events.Star:
+		i.handleStar(ctx, v)
+	default:
+		recognized = false
+	}
+	if recognized {
+		i.lastEventTS.Store(time.Now().Unix())
 	}
 }
 
@@ -270,6 +303,108 @@ func (i *Ingestor) handleGroupInfo(ctx context.Context, evt *events.GroupInfo) {
 	}
 	if err := i.store.UpsertChat(ctx, chat); err != nil {
 		i.logger.Warn("cache: group info event", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))
+	}
+}
+
+// handleJoinedGroup creates the chat row when the user joins or is added to a
+// group, before any message has flowed through it. Communities (parent groups)
+// get chat_type=community; ordinary groups and community subgroups get group.
+func (i *Ingestor) handleJoinedGroup(ctx context.Context, evt *events.JoinedGroup) {
+	if evt == nil || evt.JID.User == "" {
+		return
+	}
+	chatType := ChatTypeGroup
+	if evt.IsParent {
+		chatType = ChatTypeCommunity
+	}
+	chat := Chat{
+		JID:     evt.JID.String(),
+		IsGroup: true,
+		Type:    chatType,
+		Name:    evt.Name,
+	}
+	if !evt.NameSetAt.IsZero() {
+		chat.LastMessageTS = evt.NameSetAt
+	}
+	if err := i.store.UpsertChat(ctx, chat); err != nil {
+		i.logger.Warn("cache: joined group event", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))
+	}
+}
+
+func (i *Ingestor) handleNewsletterJoin(ctx context.Context, evt *events.NewsletterJoin) {
+	if evt == nil || evt.ID.User == "" {
+		return
+	}
+	chat := Chat{
+		JID:  evt.ID.String(),
+		Type: ChatTypeNewsletter,
+		Name: evt.ThreadMeta.Name.Text,
+	}
+	if t := evt.ThreadMeta.CreationTime.Time; !t.IsZero() {
+		chat.LastMessageTS = t
+	}
+	if err := i.store.UpsertChat(ctx, chat); err != nil {
+		i.logger.Warn("cache: newsletter join event", slog.String("jid", evt.ID.String()), slog.String("err", err.Error()))
+	}
+}
+
+// handleNewsletterLeave records that the user unsubscribed but keeps the row
+// so historical messages stay queryable. A `subscribed` flag on chats would
+// let readers filter out left newsletters; deferred to a follow-up.
+func (i *Ingestor) handleNewsletterLeave(ctx context.Context, evt *events.NewsletterLeave) {
+	if evt == nil || evt.ID.User == "" {
+		return
+	}
+	chat := Chat{JID: evt.ID.String(), Type: ChatTypeNewsletter}
+	if err := i.store.UpsertChat(ctx, chat); err != nil {
+		i.logger.Warn("cache: newsletter leave event", slog.String("jid", evt.ID.String()), slog.String("err", err.Error()))
+	}
+}
+
+func (i *Ingestor) handleMarkChatAsRead(ctx context.Context, evt *events.MarkChatAsRead) {
+	if evt == nil || evt.JID.User == "" {
+		return
+	}
+	read := evt.Action != nil && evt.Action.GetRead()
+	if err := i.store.SetChatUnread(ctx, evt.JID.String(), evt.JID.Server == types.GroupServer, !read); err != nil {
+		i.logger.Warn("cache: mark chat as read", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))
+	}
+}
+
+func (i *Ingestor) handlePin(ctx context.Context, evt *events.Pin) {
+	if evt == nil || evt.JID.User == "" {
+		return
+	}
+	pinned := evt.Action != nil && evt.Action.GetPinned()
+	if err := i.store.SetChatPinned(ctx, evt.JID.String(), evt.JID.Server == types.GroupServer, pinned); err != nil {
+		i.logger.Warn("cache: pin event", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))
+	}
+}
+
+func (i *Ingestor) handleArchive(ctx context.Context, evt *events.Archive) {
+	if evt == nil || evt.JID.User == "" {
+		return
+	}
+	archived := evt.Action != nil && evt.Action.GetArchived()
+	if err := i.store.SetChatArchived(ctx, evt.JID.String(), evt.JID.Server == types.GroupServer, archived); err != nil {
+		i.logger.Warn("cache: archive event", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))
+	}
+}
+
+// handleStar surfaces the chat row when a message is starred from another
+// device, so the chat list can include it. The starred flag itself is not
+// persisted — the messages table has no starred column today; deferred to a
+// follow-up that adds it.
+func (i *Ingestor) handleStar(ctx context.Context, evt *events.Star) {
+	if evt == nil || evt.ChatJID.User == "" {
+		return
+	}
+	chat := Chat{
+		JID:     evt.ChatJID.String(),
+		IsGroup: evt.ChatJID.Server == types.GroupServer,
+	}
+	if err := i.store.UpsertChat(ctx, chat); err != nil {
+		i.logger.Warn("cache: star event", slog.String("jid", evt.ChatJID.String()), slog.String("err", err.Error()))
 	}
 }
 

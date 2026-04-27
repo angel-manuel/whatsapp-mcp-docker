@@ -28,9 +28,10 @@ func TestUpsertChat_MergesAndKeepsLatestTimestamp(t *testing.T) {
 		isGroup     int
 		lastTS      int64
 		unreadCount int
+		chatType    string
 	)
-	row := store.DB().QueryRowContext(ctx, `SELECT name, is_group, last_message_ts, unread_count FROM chats WHERE jid = ?`, "g1@g.us")
-	if err := row.Scan(&name, &isGroup, &lastTS, &unreadCount); err != nil {
+	row := store.DB().QueryRowContext(ctx, `SELECT name, is_group, last_message_ts, unread_count, chat_type FROM chats WHERE jid = ?`, "g1@g.us")
+	if err := row.Scan(&name, &isGroup, &lastTS, &unreadCount, &chatType); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if name != "Team" {
@@ -44,6 +45,34 @@ func TestUpsertChat_MergesAndKeepsLatestTimestamp(t *testing.T) {
 	}
 	if unreadCount != 3 {
 		t.Fatalf("unread_count = %d, want 3", unreadCount)
+	}
+	if chatType != "group" {
+		t.Fatalf("chat_type = %q, want group (derived from is_group)", chatType)
+	}
+}
+
+// A subsequent upsert that does not set Type must not regress a previously
+// classified type. Mirrors the empty-name preservation rule.
+func TestUpsertChat_TypeNotRegressedByPartialUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	jid := "120363999000000001@newsletter"
+	if err := store.UpsertChat(ctx, Chat{JID: jid, Name: "Brief", Type: ChatTypeNewsletter}); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	// Second upsert leaves Type empty + flips IsGroup true. Without the
+	// CASE-preserve clause this would regress chat_type to 'group'.
+	if err := store.UpsertChat(ctx, Chat{JID: jid, Name: "", IsGroup: true}); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	var chatType string
+	if err := store.DB().QueryRowContext(ctx, `SELECT chat_type FROM chats WHERE jid = ?`, jid).Scan(&chatType); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if chatType != "newsletter" {
+		t.Fatalf("chat_type = %q, want newsletter (must not regress)", chatType)
 	}
 }
 

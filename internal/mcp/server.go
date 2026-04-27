@@ -140,9 +140,10 @@ func (s *Server) Run(ctx context.Context) error {
 // Exemption is by name rather than per-tool flag so the policy lives in
 // one transport-level place; tools authoring stays decoupled from it.
 var exemptFromPairingGate = map[string]struct{}{
-	"ping":             {},
-	"pairing_start":    {},
-	"pairing_complete": {},
+	"ping":              {},
+	"pairing_start":     {},
+	"pairing_complete":  {},
+	"cache_sync_status": {},
 }
 
 // buildCore constructs the underlying mcp-go server with the registry

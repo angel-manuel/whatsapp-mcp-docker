@@ -18,13 +18,22 @@ func (s *Store) UpsertChat(ctx context.Context, c Chat) error {
 	if c.JID == "" {
 		return errors.New("cache: UpsertChat: JID required")
 	}
+	// intentType is the type the caller asked for (empty = "I don't know,
+	// preserve existing or derive for fresh rows"). effectiveType is what
+	// gets written to a fresh row when no existing row to preserve from.
+	intentType := string(c.Type)
+	effectiveType := intentType
+	if effectiveType == "" {
+		effectiveType = string(deriveChatType(c.JID, c.IsGroup))
+	}
 	now := time.Now().Unix()
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO chats (jid, name, is_group, last_message_ts, unread_count, archived, pinned, muted_until, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO chats (jid, name, is_group, chat_type, last_message_ts, unread_count, archived, pinned, muted_until, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(jid) DO UPDATE SET
     name            = CASE WHEN excluded.name != '' THEN excluded.name ELSE chats.name END,
     is_group        = excluded.is_group,
+    chat_type       = CASE WHEN ? != '' THEN excluded.chat_type ELSE chats.chat_type END,
     last_message_ts = MAX(chats.last_message_ts, excluded.last_message_ts),
     unread_count    = excluded.unread_count,
     archived        = excluded.archived,
@@ -32,11 +41,70 @@ ON CONFLICT(jid) DO UPDATE SET
     muted_until     = excluded.muted_until,
     updated_at      = excluded.updated_at
 `,
-		c.JID, c.Name, boolToInt(c.IsGroup), unixSeconds(c.LastMessageTS), c.UnreadCount,
+		c.JID, c.Name, boolToInt(c.IsGroup), effectiveType, unixSeconds(c.LastMessageTS), c.UnreadCount,
 		boolToInt(c.Archived), boolToInt(c.Pinned), unixSeconds(c.MutedUntil), now,
+		intentType,
 	)
 	if err != nil {
 		return fmt.Errorf("cache: upsert chat %s: %w", c.JID, err)
+	}
+	return nil
+}
+
+// SetChatPinned ensures a chat row exists and updates only its pinned flag.
+// Used by appstate-driven handlers (events.Pin) that should not clobber the
+// chat's other fields (name, unread, archived, etc.).
+func (s *Store) SetChatPinned(ctx context.Context, jid string, isGroup, pinned bool) error {
+	if jid == "" {
+		return errors.New("cache: SetChatPinned: JID required")
+	}
+	now := time.Now().Unix()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO chats (jid, name, is_group, chat_type, last_message_ts, unread_count, archived, pinned, muted_until, updated_at)
+VALUES (?, '', ?, ?, 0, 0, 0, ?, 0, ?)
+ON CONFLICT(jid) DO UPDATE SET pinned = excluded.pinned, updated_at = excluded.updated_at`,
+		jid, boolToInt(isGroup), string(deriveChatType(jid, isGroup)), boolToInt(pinned), now)
+	if err != nil {
+		return fmt.Errorf("cache: set pinned on %s: %w", jid, err)
+	}
+	return nil
+}
+
+// SetChatArchived ensures a chat row exists and updates only its archived flag.
+func (s *Store) SetChatArchived(ctx context.Context, jid string, isGroup, archived bool) error {
+	if jid == "" {
+		return errors.New("cache: SetChatArchived: JID required")
+	}
+	now := time.Now().Unix()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO chats (jid, name, is_group, chat_type, last_message_ts, unread_count, archived, pinned, muted_until, updated_at)
+VALUES (?, '', ?, ?, 0, 0, ?, 0, 0, ?)
+ON CONFLICT(jid) DO UPDATE SET archived = excluded.archived, updated_at = excluded.updated_at`,
+		jid, boolToInt(isGroup), string(deriveChatType(jid, isGroup)), boolToInt(archived), now)
+	if err != nil {
+		return fmt.Errorf("cache: set archived on %s: %w", jid, err)
+	}
+	return nil
+}
+
+// SetChatUnread ensures a chat row exists and updates its unread_count to
+// 0 (read) or 1 (unread). MarkChatAsRead does not carry an exact count.
+func (s *Store) SetChatUnread(ctx context.Context, jid string, isGroup, unread bool) error {
+	if jid == "" {
+		return errors.New("cache: SetChatUnread: JID required")
+	}
+	count := 0
+	if unread {
+		count = 1
+	}
+	now := time.Now().Unix()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO chats (jid, name, is_group, chat_type, last_message_ts, unread_count, archived, pinned, muted_until, updated_at)
+VALUES (?, '', ?, ?, 0, ?, 0, 0, 0, ?)
+ON CONFLICT(jid) DO UPDATE SET unread_count = excluded.unread_count, updated_at = excluded.updated_at`,
+		jid, boolToInt(isGroup), string(deriveChatType(jid, isGroup)), count, now)
+	if err != nil {
+		return fmt.Errorf("cache: set unread on %s: %w", jid, err)
 	}
 	return nil
 }

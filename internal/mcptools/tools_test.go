@@ -83,6 +83,13 @@ func seedFixtures(t *testing.T, store *cache.Store) {
 // The returned cleanup must be invoked via t.Cleanup; it blocks until
 // the server goroutine exits.
 func newServerAndClient(t *testing.T) *mcpclient.Client {
+	return newServerAndClientWithExtras(t, nil)
+}
+
+// newServerAndClientWithExtras is identical to newServerAndClient but invokes
+// extras(store) after the standard seedFixtures, before tool registration.
+// Useful for tests that need additional rows in the cache.
+func newServerAndClientWithExtras(t *testing.T, extras func(*cache.Store)) *mcpclient.Client {
 	t.Helper()
 
 	store, err := cache.Open(context.Background(), t.TempDir())
@@ -91,6 +98,9 @@ func newServerAndClient(t *testing.T) *mcpclient.Client {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	seedFixtures(t, store)
+	if extras != nil {
+		extras(store)
+	}
 
 	reg := mcp.NewRegistry()
 	if err := mcptools.Register(reg, store); err != nil {
@@ -289,6 +299,54 @@ func TestListChats_RejectsInvalidPagination(t *testing.T) {
 	err := callToolError(t, c, "list_chats", map[string]any{"limit": -5})
 	if err["code"] != string(mcp.ErrInvalidArgument) {
 		t.Errorf("code = %v, want %s", err["code"], mcp.ErrInvalidArgument)
+	}
+}
+
+func TestListChats_ExposesChatType(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClient(t)
+
+	out := callTool(t, c, "list_chats", map[string]any{})
+	chats := out["chats"].([]any)
+	got := map[string]string{}
+	for _, raw := range chats {
+		m := raw.(map[string]any)
+		got[m["jid"].(string)] = m["chat_type"].(string)
+	}
+	want := map[string]string{
+		jidAlice: "direct",
+		jidBob:   "direct",
+		jidGroup: "group",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("chat_type for %s = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+func TestListChats_FilterByChatType(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(store *cache.Store) {
+		// Add a newsletter alongside the existing fixtures so we can prove
+		// the filter selects on chat_type rather than is_group alone.
+		if err := store.UpsertChat(context.Background(), cache.Chat{
+			JID:  "120363999000000099@newsletter",
+			Name: "Brief",
+			Type: cache.ChatTypeNewsletter,
+		}); err != nil {
+			t.Fatalf("seed newsletter: %v", err)
+		}
+	})
+
+	out := callTool(t, c, "list_chats", map[string]any{"chat_type": "newsletter"})
+	chats := out["chats"].([]any)
+	if len(chats) != 1 {
+		t.Fatalf("len(chats) = %d, want 1", len(chats))
+	}
+	first := chats[0].(map[string]any)
+	if first["jid"] != "120363999000000099@newsletter" || first["chat_type"] != "newsletter" {
+		t.Errorf("got jid=%v chat_type=%v", first["jid"], first["chat_type"])
 	}
 }
 

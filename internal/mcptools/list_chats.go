@@ -21,7 +21,8 @@ var listChatsInputSchema = json.RawMessage(`{
     "limit":                {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
     "page":                 {"type": "integer", "minimum": 0, "default": 0},
     "include_last_message": {"type": "boolean", "default": true},
-    "sort_by":              {"type": "string", "enum": ["last_active","name"], "default": "last_active"}
+    "sort_by":              {"type": "string", "enum": ["last_active","name"], "default": "last_active"},
+    "chat_type":            {"type": ["string","null"], "enum": ["direct","group","newsletter","community",null], "description": "Filter to a single chat type."}
   },
   "additionalProperties": false
 }`)
@@ -43,6 +44,7 @@ type listChatsInput struct {
 	Page               int     `json:"page"`
 	IncludeLastMessage *bool   `json:"include_last_message"`
 	SortBy             string  `json:"sort_by"`
+	ChatType           *string `json:"chat_type"`
 }
 
 type listChatsOutput struct {
@@ -87,14 +89,31 @@ func handleListChats(ctx context.Context, store *cache.Store, in listChatsInput)
 	}
 
 	var (
-		query  string
-		params []any
-		where  string
+		query    string
+		params   []any
+		where    string
+		whereKey = "WHERE"
 	)
+	addWhere := func(clause string, args ...any) {
+		if whereKey == "WHERE" {
+			where += whereKey + " " + clause
+			whereKey = "AND"
+		} else {
+			where += " " + whereKey + " " + clause
+		}
+		params = append(params, args...)
+	}
 	if in.Query != nil && *in.Query != "" {
 		like := "%" + *in.Query + "%"
-		where = "WHERE (LOWER(c.name) LIKE LOWER(?) OR c.jid LIKE ?)"
-		params = append(params, like, like)
+		addWhere("(LOWER(c.name) LIKE LOWER(?) OR c.jid LIKE ?)", like, like)
+	}
+	if in.ChatType != nil && *in.ChatType != "" {
+		switch *in.ChatType {
+		case "direct", "group", "newsletter", "community":
+			addWhere("c.chat_type = ?", *in.ChatType)
+		default:
+			return mcp.InvalidArgumentError(fmt.Sprintf("chat_type must be direct|group|newsletter|community, got %q", *in.ChatType)), nil
+		}
 	}
 
 	orderBy := "c.last_message_ts DESC, c.jid ASC"
@@ -104,7 +123,7 @@ func handleListChats(ctx context.Context, store *cache.Store, in listChatsInput)
 
 	if include {
 		query = fmt.Sprintf(`
-SELECT c.jid, c.name, c.is_group, c.last_message_ts,
+SELECT c.jid, c.name, c.is_group, c.chat_type, c.last_message_ts,
        COALESCE(m.body, ''), COALESCE(m.id, ''), COALESCE(m.sender_jid, ''),
        COALESCE(m.is_from_me, 0), CASE WHEN m.id IS NULL THEN 0 ELSE 1 END
 FROM chats c
@@ -116,7 +135,7 @@ ORDER BY %s
 LIMIT ? OFFSET ?`, where, orderBy)
 	} else {
 		query = fmt.Sprintf(`
-SELECT c.jid, c.name, c.is_group, c.last_message_ts,
+SELECT c.jid, c.name, c.is_group, c.chat_type, c.last_message_ts,
        '', '', '', 0, 0
 FROM chats c
 %s
@@ -134,15 +153,15 @@ LIMIT ? OFFSET ?`, where, orderBy)
 	out := listChatsOutput{Chats: []ChatDTO{}}
 	for rows.Next() {
 		var (
-			jid, name, body, id, sender string
-			isGroup                     int
-			ts                          int64
-			isFromMe, hasMessage        int
+			jid, name, chatType, body, id, sender string
+			isGroup                               int
+			ts                                    int64
+			isFromMe, hasMessage                  int
 		)
-		if err := rows.Scan(&jid, &name, &isGroup, &ts, &body, &id, &sender, &isFromMe, &hasMessage); err != nil {
+		if err := rows.Scan(&jid, &name, &isGroup, &chatType, &ts, &body, &id, &sender, &isFromMe, &hasMessage); err != nil {
 			return mcp.InternalError(fmt.Sprintf("list_chats scan: %v", err)), nil
 		}
-		out.Chats = append(out.Chats, buildChatDTO(jid, name, isGroup != 0, ts, include && hasMessage == 1, body, id, sender, isFromMe != 0))
+		out.Chats = append(out.Chats, buildChatDTO(jid, name, isGroup != 0, chatType, ts, include && hasMessage == 1, body, id, sender, isFromMe != 0))
 	}
 	if err := rows.Err(); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return mcp.InternalError(fmt.Sprintf("list_chats rows: %v", err)), nil
@@ -153,11 +172,12 @@ LIMIT ? OFFSET ?`, where, orderBy)
 // buildChatDTO converts DB columns into the JSON envelope used by every
 // chat-returning tool. includeLast controls whether the `last_*` fields
 // are populated or surfaced as nulls.
-func buildChatDTO(jid, name string, isGroup bool, ts int64, includeLast bool, body, id, sender string, isFromMe bool) ChatDTO {
+func buildChatDTO(jid, name string, isGroup bool, chatType string, ts int64, includeLast bool, body, id, sender string, isFromMe bool) ChatDTO {
 	dto := ChatDTO{
 		JID:             jid,
 		Name:            stringOrNil(name),
 		IsGroup:         isGroup,
+		ChatType:        chatType,
 		LastMessageTime: tsISOOrNil(ts),
 	}
 	if includeLast {

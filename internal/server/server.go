@@ -128,8 +128,9 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("build mcp server: %w", err)
 	}
 	if err := tools.Register(mcpSrv.Registry(), tools.Deps{
-		Cache: cacheStore,
-		WA:    waCli,
+		Cache:    cacheStore,
+		WA:       waCli,
+		Ingestor: ingestor,
 	}); err != nil {
 		_ = httpSrv.Shutdown(context.Background())
 		return fmt.Errorf("register tools: %w", err)

@@ -17,6 +17,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
@@ -122,10 +123,11 @@ var _ tools.WAClient = (*mockWA)(nil)
 
 // testHarness bundles the wired stdio client + its shutdown hook.
 type testHarness struct {
-	client *mcpclient.Client
-	cancel func()
-	mock   *mockWA
-	store  *cache.Store
+	client   *mcpclient.Client
+	cancel   func()
+	mock     *mockWA
+	store    *cache.Store
+	ingestor *cache.Ingestor
 }
 
 // newHarness constructs an mcp.Server with the tools package registered,
@@ -164,7 +166,8 @@ func newHarness(t *testing.T, paired bool, seed func(*cache.Store), mock *mockWA
 	if mock == nil {
 		mock = &mockWA{}
 	}
-	if err := tools.Register(srv.Registry(), tools.Deps{Cache: store, WA: mock}); err != nil {
+	ingestor := cache.NewIngestor(store, nil)
+	if err := tools.Register(srv.Registry(), tools.Deps{Cache: store, WA: mock, Ingestor: ingestor}); err != nil {
 		cancel()
 		t.Fatalf("tools.Register: %v", err)
 	}
@@ -208,7 +211,7 @@ func newHarness(t *testing.T, paired bool, seed func(*cache.Store), mock *mockWA
 		_ = store.Close()
 	})
 
-	return &testHarness{client: client, cancel: cancel, mock: mock, store: store}
+	return &testHarness{client: client, cancel: cancel, mock: mock, store: store, ingestor: ingestor}
 }
 
 func callTool(t *testing.T, h *testHarness, name string, args map[string]any) *mcpgo.CallToolResult {
@@ -830,6 +833,55 @@ func TestTools_ListRegisteredToolsAdvertisesSchemas(t *testing.T) {
 		}
 	}
 }
+
+func TestCacheSyncStatus_ReportsCountsAndHeartbeat(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, true, nil, nil)
+
+	// Empty cache: counts are zero and last_event_at is null because no
+	// event has flowed through the ingestor yet.
+	res := callTool(t, h, "cache_sync_status", nil)
+	out := structured(t, res)
+	if out["chat_count"].(float64) != 0 || out["message_count"].(float64) != 0 {
+		t.Errorf("empty cache: got %#v", out)
+	}
+	if out["last_event_at"] != nil {
+		t.Errorf("last_event_at = %v, want nil", out["last_event_at"])
+	}
+
+	// Drive a Message event through the ingestor: chat + message rows
+	// land in the cache, the heartbeat advances.
+	chatJID, err := types.ParseJID("123@s.whatsapp.net")
+	if err != nil {
+		t.Fatalf("ParseJID: %v", err)
+	}
+	h.ingestor.HandleEvent(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chatJID, Sender: chatJID, IsFromMe: false},
+			ID:            "wamid.smoke",
+			PushName:      "Smoke",
+			Timestamp:     time.Now(),
+		},
+		Message: &waE2E.Message{Conversation: stringPtr("smoke test")},
+	})
+
+	res = callTool(t, h, "cache_sync_status", nil)
+	out = structured(t, res)
+	if out["chat_count"].(float64) != 1 {
+		t.Errorf("chat_count = %v, want 1", out["chat_count"])
+	}
+	if out["message_count"].(float64) != 1 {
+		t.Errorf("message_count = %v, want 1", out["message_count"])
+	}
+	if out["last_event_at"] == nil {
+		t.Errorf("last_event_at is nil after Message event")
+	}
+	if ago, ok := out["last_event_ago_seconds"].(float64); !ok || ago > 5 {
+		t.Errorf("last_event_ago_seconds = %v, want < 5", out["last_event_ago_seconds"])
+	}
+}
+
+func stringPtr(s string) *string { return &s }
 
 // -- Pipe-adapter helpers (match the pattern in internal/mcp/server_test.go)
 

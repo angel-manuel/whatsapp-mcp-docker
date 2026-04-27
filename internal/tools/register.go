@@ -64,6 +64,12 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			InputSchema: pairingCompleteSchema,
 			Handler:     pairingComplete(deps),
 		},
+		{
+			Name:        "cache_sync_status",
+			Description: "Diagnostic snapshot of the local cache: chat / message / contact counts and the timestamp of the most recent ingested whatsmeow event. Exempt from the not_paired gate; safe to call before linking.",
+			InputSchema: cacheSyncStatusSchema,
+			Handler:     cacheSyncStatus(deps),
+		},
 	}
 	for _, t := range entries {
 		if err := reg.Register(t); err != nil {
