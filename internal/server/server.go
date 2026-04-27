@@ -54,7 +54,10 @@ func (s *Server) Run(ctx context.Context) error {
 		slog.String("data_dir", s.cfg.DataDir),
 	)
 
-	waCli, err := wa.Open(ctx, wa.Config{
+	// Like cache.Open below, wa session-store bringup runs sqlite migrations
+	// that should not be aborted mid-flight by a fast ctx cancel. Detach
+	// during Open; runtime cancellation is honored via Close/Disconnect.
+	waCli, err := wa.Open(context.Background(), wa.Config{
 		DataDir:        s.cfg.DataDir,
 		PairDeviceName: s.cfg.PairDeviceName,
 	})
