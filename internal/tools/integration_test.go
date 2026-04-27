@@ -15,6 +15,7 @@ import (
 	mcpclienttransport "github.com/mark3labs/mcp-go/client/transport"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -46,6 +47,17 @@ type mockWA struct {
 	sendCalls  int
 	lastSendTo types.JID
 	lastSendMs *waE2E.Message
+
+	// Sync surface used by cache_sync; defaults to logged-in + empty
+	// authoritative results so existing tests keep compiling.
+	loggedIn              bool
+	joinedGroups          []*types.GroupInfo
+	joinedGroupsErr       error
+	subscribedNewsletters []*types.NewsletterMetadata
+	subscribedNLErr       error
+	fetchAppStateErr      error
+	appStateCalls         int
+	appStateHook          func(name appstate.WAPatchName) // optional, fires per call
 }
 
 func (m *mockWA) GroupInfo(_ context.Context, jid types.JID) (*types.GroupInfo, error) {
@@ -118,6 +130,35 @@ func (m *mockWA) PairWaitNext(context.Context) (wa.PairEvent, bool, error) {
 }
 func (m *mockWA) Status() wa.Status { return wa.Status{} }
 
+// Sync surface — default behaviour is "logged in, no groups, no newsletters,
+// FetchAppState succeeds without firing events". Tests opt in by setting
+// the mockWA fields above. Loggedin defaults to true unless the test
+// explicitly sets false (zero value would make every cache_sync test fail
+// the IsLoggedIn pre-flight).
+func (m *mockWA) IsLoggedIn() bool { return m.loggedIn }
+
+func (m *mockWA) GetJoinedGroups(context.Context) ([]*types.GroupInfo, error) {
+	if m.joinedGroupsErr != nil {
+		return nil, m.joinedGroupsErr
+	}
+	return m.joinedGroups, nil
+}
+
+func (m *mockWA) GetSubscribedNewsletters(context.Context) ([]*types.NewsletterMetadata, error) {
+	if m.subscribedNLErr != nil {
+		return nil, m.subscribedNLErr
+	}
+	return m.subscribedNewsletters, nil
+}
+
+func (m *mockWA) FetchAppState(_ context.Context, name appstate.WAPatchName, _, _ bool) error {
+	m.appStateCalls++
+	if m.appStateHook != nil {
+		m.appStateHook(name)
+	}
+	return m.fetchAppStateErr
+}
+
 // Confirm the mock satisfies the tools.WAClient interface at compile time.
 var _ tools.WAClient = (*mockWA)(nil)
 
@@ -128,6 +169,7 @@ type testHarness struct {
 	mock     *mockWA
 	store    *cache.Store
 	ingestor *cache.Ingestor
+	sync     *cache.SyncOrchestrator
 }
 
 // newHarness constructs an mcp.Server with the tools package registered,
@@ -166,8 +208,15 @@ func newHarness(t *testing.T, paired bool, seed func(*cache.Store), mock *mockWA
 	if mock == nil {
 		mock = &mockWA{}
 	}
+	// Default the live-session flag from the paired arg so tests that
+	// build a paired harness see IsLoggedIn() == true without each test
+	// having to remember to flip it. Tests can override via the mock arg.
+	if !mock.loggedIn {
+		mock.loggedIn = paired
+	}
 	ingestor := cache.NewIngestor(store, nil)
-	if err := tools.Register(srv.Registry(), tools.Deps{Cache: store, WA: mock, Ingestor: ingestor}); err != nil {
+	syncOrch := cache.NewSyncOrchestrator(store, ingestor, nil)
+	if err := tools.Register(srv.Registry(), tools.Deps{Cache: store, WA: mock, Ingestor: ingestor, Sync: syncOrch}); err != nil {
 		cancel()
 		t.Fatalf("tools.Register: %v", err)
 	}
@@ -211,7 +260,7 @@ func newHarness(t *testing.T, paired bool, seed func(*cache.Store), mock *mockWA
 		_ = store.Close()
 	})
 
-	return &testHarness{client: client, cancel: cancel, mock: mock, store: store, ingestor: ingestor}
+	return &testHarness{client: client, cancel: cancel, mock: mock, store: store, ingestor: ingestor, sync: syncOrch}
 }
 
 func callTool(t *testing.T, h *testHarness, name string, args map[string]any) *mcpgo.CallToolResult {
@@ -524,7 +573,7 @@ func TestTools_NotPairedShortCircuits(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, false, seedContacts, &mockWA{})
 
-	for _, name := range []string{"search_contacts", "list_all_contacts", "get_contact_details", "get_group_info", "send_message"} {
+	for _, name := range []string{"search_contacts", "list_all_contacts", "get_contact_details", "get_group_info", "send_message", "cache_sync"} {
 		t.Run(name, func(t *testing.T) {
 			var args map[string]any
 			switch name {
@@ -882,6 +931,76 @@ func TestCacheSyncStatus_ReportsCountsAndHeartbeat(t *testing.T) {
 }
 
 func stringPtr(s string) *string { return &s }
+
+func TestCacheSync_KicksOffAndStatusReports(t *testing.T) {
+	t.Parallel()
+
+	groupJID, _ := types.ParseJID("120363100000000777@g.us")
+	nlJID, _ := types.ParseJID("120363999000000888@newsletter")
+	mock := &mockWA{
+		joinedGroups: []*types.GroupInfo{
+			{JID: groupJID, GroupName: types.GroupName{Name: "Sync Test"}},
+		},
+		subscribedNewsletters: []*types.NewsletterMetadata{
+			{ID: nlJID, ThreadMeta: types.NewsletterThreadMetadata{Name: types.NewsletterText{Text: "Briefs"}}},
+		},
+	}
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "cache_sync", nil)
+	if res.IsError {
+		t.Fatalf("cache_sync error: %+v", structured(t, res))
+	}
+	out := structured(t, res)
+	syncID, _ := out["sync_id"].(string)
+	if syncID == "" {
+		t.Fatalf("sync_id missing in %#v", out)
+	}
+
+	// Poll cache_sync_status until the orchestrator reports done.
+	deadline := time.After(3 * time.Second)
+	var statusOut map[string]any
+	for {
+		statusRes := callTool(t, h, "cache_sync_status", nil)
+		statusOut = structured(t, statusRes)
+		sync, _ := statusOut["sync"].(map[string]any)
+		if sync != nil && sync["status"] == "done" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("sync did not report done; status snapshot=%#v", statusOut["sync"])
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	sync := statusOut["sync"].(map[string]any)
+	if sync["sync_id"] != syncID {
+		t.Errorf("status sync_id=%v, want %s", sync["sync_id"], syncID)
+	}
+	stages := sync["stages"].([]any)
+	if len(stages) != 3 {
+		t.Fatalf("stages len = %d, want 3", len(stages))
+	}
+	groupsStage := stages[0].(map[string]any)
+	if groupsStage["name"] != "groups" || groupsStage["status"] != "done" || groupsStage["items"].(float64) != 1 {
+		t.Errorf("groups stage = %#v", groupsStage)
+	}
+	newslettersStage := stages[1].(map[string]any)
+	if newslettersStage["name"] != "newsletters" || newslettersStage["items"].(float64) != 1 {
+		t.Errorf("newsletters stage = %#v", newslettersStage)
+	}
+
+	// Confirm the rows actually landed in the cache.
+	for _, jid := range []string{groupJID.String(), nlJID.String()} {
+		var ct string
+		err := h.store.DB().QueryRowContext(context.Background(),
+			`SELECT chat_type FROM chats WHERE jid = ?`, jid).Scan(&ct)
+		if err != nil {
+			t.Errorf("expected chat %s in cache: %v", jid, err)
+		}
+	}
+}
 
 // -- Pipe-adapter helpers (match the pattern in internal/mcp/server_test.go)
 

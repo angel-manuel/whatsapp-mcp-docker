@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 
@@ -54,6 +55,20 @@ func (f *fakeWA) SendMessage(context.Context, types.JID, *waE2E.Message) (whatsm
 	return whatsmeow.SendResponse{}, nil
 }
 func (f *fakeWA) OwnJID() types.JID { return types.JID{} }
+
+// Sync surface — pairing tests don't drive it; defaults make IsLoggedIn
+// reflect "active session" (so cache_sync's pre-flight wouldn't reject
+// in pairing tests, though those tests never call cache_sync).
+func (f *fakeWA) IsLoggedIn() bool { return true }
+func (f *fakeWA) GetJoinedGroups(context.Context) ([]*types.GroupInfo, error) {
+	return nil, nil
+}
+func (f *fakeWA) GetSubscribedNewsletters(context.Context) ([]*types.NewsletterMetadata, error) {
+	return nil, nil
+}
+func (f *fakeWA) FetchAppState(context.Context, appstate.WAPatchName, bool, bool) error {
+	return nil
+}
 
 func (f *fakeWA) StartPairing(context.Context, string) (<-chan wa.PairEvent, error) {
 	if f.startErr != nil {
