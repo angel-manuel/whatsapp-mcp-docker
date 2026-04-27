@@ -71,6 +71,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 
 	ingestor := cache.NewIngestor(cacheStore, applog.WithEvent(s.log, "cache.ingest"))
+	syncOrch := cache.NewSyncOrchestrator(cacheStore, ingestor, applog.WithEvent(s.log, "cache.sync"))
 
 	// Like cache.Open above, wa session-store bringup runs sqlite migrations
 	// that should not be aborted mid-flight by a fast ctx cancel. Detach
@@ -131,6 +132,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Cache:    cacheStore,
 		WA:       waCli,
 		Ingestor: ingestor,
+		Sync:     syncOrch,
 	}); err != nil {
 		_ = httpSrv.Shutdown(context.Background())
 		return fmt.Errorf("register tools: %w", err)
