@@ -23,6 +23,15 @@ type Ingestor struct {
 	store       *Store
 	logger      *slog.Logger
 	lastEventTS atomic.Int64 // unix seconds of the most recent recognized event
+
+	// Per-app-state-event counters used by the cache_sync orchestrator's
+	// app_state stage to estimate items processed per FetchAppState patch.
+	// Bumped inside the matching handlers; concurrent live events also bump
+	// them, so attribution is approximate but good enough for v1 progress.
+	markRead atomic.Int64
+	pin      atomic.Int64
+	archive  atomic.Int64
+	contact  atomic.Int64
 }
 
 // LastEventAt returns the timestamp of the last successfully ingested event,
@@ -34,6 +43,14 @@ func (i *Ingestor) LastEventAt() time.Time {
 		return time.Time{}
 	}
 	return time.Unix(sec, 0).UTC()
+}
+
+// AppStateCounts returns running totals of the four event types
+// FetchAppState typically dispatches: MarkChatAsRead, Pin, Archive,
+// Contact. The sync orchestrator snapshots these around each
+// FetchAppState call to estimate per-stage progress.
+func (i *Ingestor) AppStateCounts() (markRead, pin, archive, contact int64) {
+	return i.markRead.Load(), i.pin.Load(), i.archive.Load(), i.contact.Load()
 }
 
 // NewIngestor constructs an Ingestor backed by store. A nil logger is replaced
@@ -250,6 +267,7 @@ func (i *Ingestor) handleContact(ctx context.Context, evt *events.Contact) {
 	if evt == nil || evt.Action == nil {
 		return
 	}
+	i.contact.Add(1)
 	jid := evt.JID.ToNonAD().String()
 	if jid == "" {
 		return
@@ -365,6 +383,7 @@ func (i *Ingestor) handleMarkChatAsRead(ctx context.Context, evt *events.MarkCha
 	if evt == nil || evt.JID.User == "" {
 		return
 	}
+	i.markRead.Add(1)
 	read := evt.Action != nil && evt.Action.GetRead()
 	if err := i.store.SetChatUnread(ctx, evt.JID.String(), evt.JID.Server == types.GroupServer, !read); err != nil {
 		i.logger.Warn("cache: mark chat as read", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))
@@ -375,6 +394,7 @@ func (i *Ingestor) handlePin(ctx context.Context, evt *events.Pin) {
 	if evt == nil || evt.JID.User == "" {
 		return
 	}
+	i.pin.Add(1)
 	pinned := evt.Action != nil && evt.Action.GetPinned()
 	if err := i.store.SetChatPinned(ctx, evt.JID.String(), evt.JID.Server == types.GroupServer, pinned); err != nil {
 		i.logger.Warn("cache: pin event", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))
@@ -385,6 +405,7 @@ func (i *Ingestor) handleArchive(ctx context.Context, evt *events.Archive) {
 	if evt == nil || evt.JID.User == "" {
 		return
 	}
+	i.archive.Add(1)
 	archived := evt.Action != nil && evt.Action.GetArchived()
 	if err := i.store.SetChatArchived(ctx, evt.JID.String(), evt.JID.Server == types.GroupServer, archived); err != nil {
 		i.logger.Warn("cache: archive event", slog.String("jid", evt.JID.String()), slog.String("err", err.Error()))
