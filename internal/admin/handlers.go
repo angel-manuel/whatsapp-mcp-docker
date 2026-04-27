@@ -105,7 +105,7 @@ func (s *Server) handlePairStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	ch, err := s.wa.StartPairing(ctx)
+	ch, err := s.wa.StartPairing(ctx, "")
 	if err != nil {
 		// Map sentinel errors to stable codes. Errors emitted before the SSE
 		// stream starts are returned as normal JSON so clients can surface a

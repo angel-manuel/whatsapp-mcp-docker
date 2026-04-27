@@ -105,7 +105,7 @@ func (m *mockWA) OwnJID() types.JID { return m.ownJID }
 // drive pairing; the methods return inert defaults so the mock still
 // satisfies tools.WAClient. The pairing-specific tests live in
 // pairing_test.go and use a dedicated fake.
-func (m *mockWA) StartPairing(context.Context) (<-chan wa.PairEvent, error) {
+func (m *mockWA) StartPairing(context.Context, string) (<-chan wa.PairEvent, error) {
 	return nil, wa.ErrAlreadyPaired
 }
 func (m *mockWA) PairPhone(context.Context, string) (string, error) {

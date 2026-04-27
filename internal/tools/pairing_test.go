@@ -55,7 +55,7 @@ func (f *fakeWA) SendMessage(context.Context, types.JID, *waE2E.Message) (whatsm
 }
 func (f *fakeWA) OwnJID() types.JID { return types.JID{} }
 
-func (f *fakeWA) StartPairing(context.Context) (<-chan wa.PairEvent, error) {
+func (f *fakeWA) StartPairing(context.Context, string) (<-chan wa.PairEvent, error) {
 	if f.startErr != nil {
 		return nil, f.startErr
 	}
@@ -258,7 +258,7 @@ func TestPairingComplete_NotPairing(t *testing.T) {
 
 func TestPairingComplete_WaitZeroReturnsLatest(t *testing.T) {
 	f := newFakeWA()
-	if _, err := f.StartPairing(context.Background()); err != nil {
+	if _, err := f.StartPairing(context.Background(), ""); err != nil {
 		t.Fatalf("StartPairing: %v", err)
 	}
 	f.publish(wa.PairEvent{Type: wa.PairEventCode, Code: "rotating-1", TimeoutMs: 15000})
@@ -278,7 +278,7 @@ func TestPairingComplete_WaitZeroReturnsLatest(t *testing.T) {
 
 func TestPairingComplete_WaitForTerminal(t *testing.T) {
 	f := newFakeWA()
-	if _, err := f.StartPairing(context.Background()); err != nil {
+	if _, err := f.StartPairing(context.Background(), ""); err != nil {
 		t.Fatalf("StartPairing: %v", err)
 	}
 	f.publish(wa.PairEvent{Type: wa.PairEventCode, Code: "rotating-1"})
@@ -309,7 +309,7 @@ func TestPairingComplete_WaitForTerminal(t *testing.T) {
 
 func TestPairingComplete_RotationOnlyReturnsPending(t *testing.T) {
 	f := newFakeWA()
-	if _, err := f.StartPairing(context.Background()); err != nil {
+	if _, err := f.StartPairing(context.Background(), ""); err != nil {
 		t.Fatalf("StartPairing: %v", err)
 	}
 	f.publish(wa.PairEvent{Type: wa.PairEventCode, Code: "rot-1", TimeoutMs: 15000})

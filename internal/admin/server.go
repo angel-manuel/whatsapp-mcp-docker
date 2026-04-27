@@ -19,7 +19,7 @@ import (
 type WAService interface {
 	Status() wa.Status
 	Subscribe() (<-chan wa.Event, func())
-	StartPairing(ctx context.Context) (<-chan wa.PairEvent, error)
+	StartPairing(ctx context.Context, deviceName string) (<-chan wa.PairEvent, error)
 	PairPhone(ctx context.Context, phone string) (string, error)
 	Unpair(ctx context.Context) error
 }
