@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 
@@ -31,6 +32,14 @@ type WAClient interface {
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error)
 	OwnJID() types.JID
 
+	// Authoritative reconciliation surface — used by cache_sync to refresh
+	// the local cache against the WhatsApp servers. IsLoggedIn is the
+	// pre-flight short-circuit; the others are the actual fan-out.
+	IsLoggedIn() bool
+	GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error)
+	GetSubscribedNewsletters(ctx context.Context) ([]*types.NewsletterMetadata, error)
+	FetchAppState(ctx context.Context, name appstate.WAPatchName, fullSync, onlyIfNotSynced bool) error
+
 	// Pairing surface — used by the pairing_start and pairing_complete
 	// MCP tools. The lifecycle is owned by *wa.Client; this interface
 	// just forwards.
@@ -46,5 +55,6 @@ type WAClient interface {
 type Deps struct {
 	Cache    *cache.Store
 	WA       WAClient
-	Ingestor *cache.Ingestor // optional; cache_sync_status reads its heartbeat
+	Ingestor *cache.Ingestor         // optional; cache_sync_status reads its heartbeat
+	Sync     *cache.SyncOrchestrator // optional; required by cache_sync, surfaced by cache_sync_status
 }

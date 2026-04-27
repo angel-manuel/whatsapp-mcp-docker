@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -92,6 +93,49 @@ func (c *Client) OwnJID() types.JID {
 		return types.JID{}
 	}
 	return *wm.Store.ID
+}
+
+// IsLoggedIn reports whether the underlying whatsmeow client currently has
+// a live session with the WhatsApp servers. Used by callers (e.g. the
+// cache sync orchestrator) that want a cheap pre-flight check before
+// firing a fan-out of authoritative reads.
+func (c *Client) IsLoggedIn() bool {
+	wm := c.snapshotWM()
+	return wm != nil && wm.IsLoggedIn()
+}
+
+// GetJoinedGroups returns the authoritative list of groups the paired
+// device is a member of. Used by the cache sync orchestrator to reconcile
+// the cached chats table.
+func (c *Client) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
+	wm := c.snapshotWM()
+	if wm == nil || !wm.IsLoggedIn() {
+		return nil, ErrNotLoggedIn
+	}
+	return wm.GetJoinedGroups(ctx)
+}
+
+// GetSubscribedNewsletters returns the authoritative list of newsletters
+// the paired device follows. Used by the cache sync orchestrator.
+func (c *Client) GetSubscribedNewsletters(ctx context.Context) ([]*types.NewsletterMetadata, error) {
+	wm := c.snapshotWM()
+	if wm == nil || !wm.IsLoggedIn() {
+		return nil, ErrNotLoggedIn
+	}
+	return wm.GetSubscribedNewsletters(ctx)
+}
+
+// FetchAppState pulls the named app-state patch from the WhatsApp server.
+// The response is dispatched through the normal event handler chain, so
+// the cache ingestor sees the resulting MarkChatAsRead/Pin/Archive/Contact
+// events and persists them. Used by the cache sync orchestrator's
+// app_state stage.
+func (c *Client) FetchAppState(ctx context.Context, name appstate.WAPatchName, fullSync, onlyIfNotSynced bool) error {
+	wm := c.snapshotWM()
+	if wm == nil || !wm.IsLoggedIn() {
+		return ErrNotLoggedIn
+	}
+	return wm.FetchAppState(ctx, name, fullSync, onlyIfNotSynced)
 }
 
 // snapshotWM returns the underlying whatsmeow client under lock. Nil is
