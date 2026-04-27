@@ -142,6 +142,17 @@ func pairingStart(deps Deps) mcp.Handler {
 			return mcp.InternalError("pair flow vanished after start"), nil
 		}
 
+		// If the first event is terminal (e.g. client_outdated emitted
+		// before any QR), surface it directly rather than masquerading
+		// as awaiting_scan with an empty code. Phone-mode below would
+		// also be moot — short-circuit.
+		if evt.IsTerminal() {
+			return PairingStartResult{
+				Status:    terminalToStatus(evt.Type),
+				TimeoutMs: evt.TimeoutMs,
+			}, nil
+		}
+
 		result := PairingStartResult{
 			Status:    pairStatusAwaitingScan,
 			Code:      evt.Code,

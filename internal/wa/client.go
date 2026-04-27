@@ -55,6 +55,10 @@ type Config struct {
 	// PairClientDisplay is the "Browser (OS)" string sent during phone-code
 	// pairing. Empty defaults to DefaultPairClientDisplay.
 	PairClientDisplay string
+	// EventHook, if non-nil, is invoked synchronously by the dispatcher
+	// for every raw whatsmeow event after the lifecycle handler runs.
+	// Used to fan events to the cache ingestor without coupling wa to it.
+	EventHook func(evt any)
 }
 
 // Client owns the whatsmeow client, the sqlstore container, and the lifecycle

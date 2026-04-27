@@ -54,26 +54,11 @@ func (s *Server) Run(ctx context.Context) error {
 		slog.String("data_dir", s.cfg.DataDir),
 	)
 
-	// Like cache.Open below, wa session-store bringup runs sqlite migrations
-	// that should not be aborted mid-flight by a fast ctx cancel. Detach
-	// during Open; runtime cancellation is honored via Close/Disconnect.
-	waCli, err := wa.Open(context.Background(), wa.Config{
-		DataDir:        s.cfg.DataDir,
-		PairDeviceName: s.cfg.PairDeviceName,
-	})
-	if err != nil {
-		return fmt.Errorf("wa open: %w", err)
-	}
-	defer func() {
-		if err := waCli.Close(); err != nil {
-			applog.WithEvent(s.log, "server.stop").Warn("wa close",
-				slog.String("err", err.Error()))
-		}
-	}()
-
 	// Cache migrations are schema-only; don't let a fast ctx cancel
 	// leave us with a half-applied schema. Use a detached background
 	// context so Open either succeeds or fails on its own terms.
+	// Opened before wa so the ingestor can be wired into the wa
+	// EventHook from the very first whatsmeow event.
 	cacheStore, err := cache.Open(context.Background(), s.cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("cache open: %w", err)
@@ -81,6 +66,26 @@ func (s *Server) Run(ctx context.Context) error {
 	defer func() {
 		if err := cacheStore.Close(); err != nil {
 			applog.WithEvent(s.log, "server.stop").Warn("cache close",
+				slog.String("err", err.Error()))
+		}
+	}()
+
+	ingestor := cache.NewIngestor(cacheStore, applog.WithEvent(s.log, "cache.ingest"))
+
+	// Like cache.Open above, wa session-store bringup runs sqlite migrations
+	// that should not be aborted mid-flight by a fast ctx cancel. Detach
+	// during Open; runtime cancellation is honored via Close/Disconnect.
+	waCli, err := wa.Open(context.Background(), wa.Config{
+		DataDir:        s.cfg.DataDir,
+		PairDeviceName: s.cfg.PairDeviceName,
+		EventHook:      ingestor.HandleEvent,
+	})
+	if err != nil {
+		return fmt.Errorf("wa open: %w", err)
+	}
+	defer func() {
+		if err := waCli.Close(); err != nil {
+			applog.WithEvent(s.log, "server.stop").Warn("wa close",
 				slog.String("err", err.Error()))
 		}
 	}()

@@ -211,3 +211,37 @@ func TestConnectReturnsErrNotPairedWhenUnpaired(t *testing.T) {
 		t.Fatalf("Connect on fresh dir: want ErrNotPaired, got %v", err)
 	}
 }
+
+func TestEventHookReceivesRawEvents(t *testing.T) {
+	hook := make(chan any, 4)
+	c, err := Open(context.Background(), Config{
+		DataDir:   t.TempDir(),
+		EventHook: func(evt any) { hook <- evt },
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Lifecycle event the dispatcher's switch handles — hook still fires.
+	c.rawCh <- &events.Connected{}
+	select {
+	case got := <-hook:
+		if _, ok := got.(*events.Connected); !ok {
+			t.Fatalf("hook got %T, want *events.Connected", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Connected on hook")
+	}
+
+	// Non-lifecycle event the switch silently drops — hook must still see it.
+	c.rawCh <- &events.HistorySync{}
+	select {
+	case got := <-hook:
+		if _, ok := got.(*events.HistorySync); !ok {
+			t.Fatalf("hook got %T, want *events.HistorySync", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for HistorySync on hook")
+	}
+}
