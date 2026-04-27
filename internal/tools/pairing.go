@@ -119,7 +119,7 @@ func pairingStart(deps Deps) mcp.Handler {
 		// the channel; it exits when wa closes it on terminal/cancel.
 		if ch != nil {
 			go func() {
-				for range ch {
+				for range ch { //nolint:revive // intentional no-op drain
 				}
 			}()
 		}

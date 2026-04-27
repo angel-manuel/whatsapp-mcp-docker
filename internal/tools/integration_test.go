@@ -111,9 +111,11 @@ func (m *mockWA) StartPairing(context.Context, string) (<-chan wa.PairEvent, err
 func (m *mockWA) PairPhone(context.Context, string) (string, error) {
 	return "", wa.ErrNotPairing
 }
-func (m *mockWA) PairLatest() (wa.PairEvent, bool)                       { return wa.PairEvent{}, false }
-func (m *mockWA) PairWaitNext(context.Context) (wa.PairEvent, bool, error) { return wa.PairEvent{}, false, nil }
-func (m *mockWA) Status() wa.Status                                      { return wa.Status{} }
+func (m *mockWA) PairLatest() (wa.PairEvent, bool) { return wa.PairEvent{}, false }
+func (m *mockWA) PairWaitNext(context.Context) (wa.PairEvent, bool, error) {
+	return wa.PairEvent{}, false, nil
+}
+func (m *mockWA) Status() wa.Status { return wa.Status{} }
 
 // Confirm the mock satisfies the tools.WAClient interface at compile time.
 var _ tools.WAClient = (*mockWA)(nil)

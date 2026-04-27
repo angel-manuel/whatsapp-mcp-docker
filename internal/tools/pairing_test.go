@@ -29,8 +29,8 @@ type fakeWA struct {
 	latest   wa.PairEvent
 	hasEvent bool
 	seq      uint64
-	closed   bool             // no more events; PairWaitNext returns immediately
-	active   bool             // a flow has been started
+	closed   bool              // no more events; PairWaitNext returns immediately
+	active   bool              // a flow has been started
 	outCh    chan wa.PairEvent // optional: returned from StartPairing for drainer tests
 }
 
