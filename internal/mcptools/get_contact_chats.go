@@ -72,7 +72,7 @@ func handleGetContactChats(ctx context.Context, store *cache.Store, in getContac
 	//  - the direct chat keyed on the contact jid, OR
 	//  - any chat (direct or group) where the contact is a recorded sender.
 	query := `
-SELECT c.jid, c.name, c.is_group, c.last_message_ts,
+SELECT c.jid, c.name, c.is_group, c.chat_type, c.last_message_ts,
        COALESCE(m.body, ''), COALESCE(m.id, ''), COALESCE(m.sender_jid, ''),
        COALESCE(m.is_from_me, 0), CASE WHEN m.id IS NULL THEN 0 ELSE 1 END
 FROM chats c
@@ -92,15 +92,15 @@ LIMIT ? OFFSET ?`
 	}{Chats: []ChatDTO{}}
 	for rows.Next() {
 		var (
-			cj, name, body, id, sender string
-			isGroup, isFromMe          int
-			ts                         int64
-			hasMessage                 int
+			cj, name, chatType, body, id, sender string
+			isGroup, isFromMe                    int
+			ts                                   int64
+			hasMessage                           int
 		)
-		if err := rows.Scan(&cj, &name, &isGroup, &ts, &body, &id, &sender, &isFromMe, &hasMessage); err != nil {
+		if err := rows.Scan(&cj, &name, &isGroup, &chatType, &ts, &body, &id, &sender, &isFromMe, &hasMessage); err != nil {
 			return mcp.InternalError(fmt.Sprintf("get_contact_chats scan: %v", err)), nil
 		}
-		out.Chats = append(out.Chats, buildChatDTO(cj, name, isGroup != 0, ts, hasMessage == 1, body, id, sender, isFromMe != 0))
+		out.Chats = append(out.Chats, buildChatDTO(cj, name, isGroup != 0, chatType, ts, hasMessage == 1, body, id, sender, isFromMe != 0))
 	}
 	if err := rows.Err(); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return mcp.InternalError(fmt.Sprintf("get_contact_chats rows: %v", err)), nil

@@ -8,6 +8,7 @@ type ChatDTO struct {
 	JID             string `json:"jid"`
 	Name            any    `json:"name"` // string | null
 	IsGroup         bool   `json:"is_group"`
+	ChatType        string `json:"chat_type"` // "direct" | "group" | "newsletter" | "community"
 	LastMessageTime any    `json:"last_message_time"` // ISO-8601 string | null
 	LastMessage     any    `json:"last_message"`      // string | null
 	LastMessageID   any    `json:"last_message_id"`   // string | null
@@ -40,13 +41,14 @@ const chatSchemaFragment = `{
     "jid":               {"type": "string"},
     "name":              {"type": ["string","null"]},
     "is_group":          {"type": "boolean"},
+    "chat_type":         {"type": "string", "enum": ["direct","group","newsletter","community"]},
     "last_message_time": {"type": ["string","null"], "format": "date-time"},
     "last_message":      {"type": ["string","null"]},
     "last_message_id":   {"type": ["string","null"]},
     "last_sender":       {"type": ["string","null"]},
     "last_is_from_me":   {"type": ["boolean","null"]}
   },
-  "required": ["jid","is_group"]
+  "required": ["jid","is_group","chat_type"]
 }`
 
 const messageSchemaFragment = `{

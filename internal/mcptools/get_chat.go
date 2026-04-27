@@ -57,13 +57,13 @@ func handleGetChat(ctx context.Context, store *cache.Store, in getChatInput) (an
 	}
 
 	var (
-		name, body, id, sender string
-		isGroup, isFromMe      int
-		ts                     int64
-		hasMessage             int
+		name, chatType, body, id, sender string
+		isGroup, isFromMe                int
+		ts                               int64
+		hasMessage                       int
 	)
 	query := `
-SELECT c.name, c.is_group, c.last_message_ts,
+SELECT c.name, c.is_group, c.chat_type, c.last_message_ts,
        COALESCE(m.body, ''), COALESCE(m.id, ''), COALESCE(m.sender_jid, ''),
        COALESCE(m.is_from_me, 0), CASE WHEN m.id IS NULL THEN 0 ELSE 1 END
 FROM chats c
@@ -72,7 +72,7 @@ LEFT JOIN messages m
       AND m.ts = c.last_message_ts
 WHERE c.jid = ?`
 	err := store.DB().QueryRowContext(ctx, query, in.ChatJID).Scan(
-		&name, &isGroup, &ts, &body, &id, &sender, &isFromMe, &hasMessage,
+		&name, &isGroup, &chatType, &ts, &body, &id, &sender, &isFromMe, &hasMessage,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return mcp.NotFoundError(fmt.Sprintf("chat %q not found", in.ChatJID)), nil
@@ -81,5 +81,5 @@ WHERE c.jid = ?`
 		return mcp.InternalError(fmt.Sprintf("get_chat: %v", err)), nil
 	}
 
-	return buildChatDTO(in.ChatJID, name, isGroup != 0, ts, include && hasMessage == 1, body, id, sender, isFromMe != 0), nil
+	return buildChatDTO(in.ChatJID, name, isGroup != 0, chatType, ts, include && hasMessage == 1, body, id, sender, isFromMe != 0), nil
 }
