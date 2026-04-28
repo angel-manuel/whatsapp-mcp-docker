@@ -12,8 +12,8 @@ import (
 )
 
 // pairing_start: opens a pair flow and returns the first observed event.
-// When `phone` is supplied, also requests a phone-link code (mirroring
-// /admin/pair/phone, which requires that the QR flow be open first).
+// When `phone` is supplied, also requests a phone-link code (requires that
+// the QR flow be open first).
 var pairingStartSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -111,12 +111,11 @@ func pairingStart(deps Deps) mcp.Handler {
 			}
 		}
 		// The wa goroutine fans events to both the observation cond
-		// (which pairing_complete drains) AND the returned channel
-		// (intended for the admin SSE consumer). The MCP path has no
-		// SSE consumer, so without a drainer the channel fills at 8
-		// rotations and the producer wedges on send — stalling the
-		// pair flow entirely. Run a no-op drainer for the lifetime of
-		// the channel; it exits when wa closes it on terminal/cancel.
+		// (which pairing_complete drains) AND the returned channel.
+		// Without a drainer the channel fills at 8 rotations and the
+		// producer wedges on send — stalling the pair flow entirely.
+		// Run a no-op drainer for the lifetime of the channel; it
+		// exits when wa closes it on terminal/cancel.
 		if ch != nil {
 			go func() {
 				for range ch { //nolint:revive // intentional no-op drain

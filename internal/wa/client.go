@@ -27,7 +27,7 @@ const DefaultDataDir = "/data"
 // accepts when pairing via phone code; it appears on the user's phone.
 const DefaultPairClientDisplay = "Chrome (Linux)"
 
-// Errors returned by the admin ops on Client.
+// Errors returned by pairing operations on Client.
 var (
 	// ErrNotPaired is returned by Connect when no paired device is present.
 	ErrNotPaired = errors.New("wa: no paired device present")
@@ -39,7 +39,7 @@ var (
 	ErrPairInProgress = errors.New("wa: pair flow already in progress")
 	// ErrNotPairing is returned by PairPhone when no pair flow is active
 	// (PairPhone shares the socket opened by StartPairing).
-	ErrNotPairing = errors.New("wa: no active pair flow; call /admin/pair/start first")
+	ErrNotPairing = errors.New("wa: no active pair flow; call pairing_start first")
 )
 
 // Config controls how the wa.Client is constructed.
@@ -73,8 +73,7 @@ type Client struct {
 	// Unpair) against each other. Holders must not also hold mu.
 	adminMu sync.Mutex
 
-	// pairing is non-nil while a /admin/pair/start flow is active. Protected
-	// by adminMu.
+	// pairing is non-nil while a pairing flow is active. Protected by adminMu.
 	pairing *pairSession
 
 	mu        sync.Mutex

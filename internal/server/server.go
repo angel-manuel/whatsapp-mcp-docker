@@ -1,19 +1,13 @@
 // Package server wires the loaded configuration and logger into a runnable
-// application. It owns the whatsmeow client, the admin HTTP listener, and
-// the MCP transport (stdio or HTTP/SSE).
+// application. It owns the whatsmeow client and the MCP transport (stdio or
+// HTTP/SSE).
 package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
-	"strconv"
-	"time"
 
-	"github.com/angel-manuel/whatsapp-mcp-docker/internal/admin"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/config"
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
@@ -22,10 +16,6 @@ import (
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/tools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
-
-// shutdownTimeout bounds graceful HTTP server shutdown so we exit promptly
-// even if a slow SSE consumer ignores the context cancellation.
-const shutdownTimeout = 10 * time.Second
 
 // Version is baked into the MCP server identity. main overrides this via
 // ldflags at build time.
@@ -50,7 +40,6 @@ func (s *Server) Run(ctx context.Context) error {
 		slog.String("transport", string(s.cfg.Transport)),
 		slog.String("bind_addr", s.cfg.BindAddr),
 		slog.Int("port", s.cfg.Port),
-		slog.Int("admin_port", s.cfg.AdminPort),
 		slog.String("data_dir", s.cfg.DataDir),
 	)
 
@@ -91,41 +80,8 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	adminAddr := s.resolveAdminAddr()
-	adminSrv := admin.New(admin.Config{
-		BindAddr:    adminAddr.host,
-		Port:        adminAddr.port,
-		AuthToken:   s.cfg.AuthToken,
-		RequireAuth: s.cfg.Transport == config.TransportHTTP,
-	}, s.log, waCli)
-
-	httpSrv := &http.Server{
-		Addr:              net.JoinHostPort(adminAddr.host, strconv.Itoa(adminAddr.port)),
-		Handler:           adminSrv.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	listener, err := net.Listen("tcp", httpSrv.Addr)
-	if err != nil {
-		return fmt.Errorf("admin listen %s: %w", httpSrv.Addr, err)
-	}
-
-	applog.WithEvent(s.log, "admin.listen").Info("admin http listening",
-		slog.String("addr", httpSrv.Addr))
-
-	errCh := make(chan error, 2)
-	go func() {
-		if err := httpSrv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("admin http: %w", err)
-			return
-		}
-		errCh <- nil
-	}()
-
 	mcpSrv, err := s.buildMCP(waCli, cacheStore)
 	if err != nil {
-		// Shut the admin listener down before bailing.
-		_ = httpSrv.Shutdown(context.Background())
 		return fmt.Errorf("build mcp server: %w", err)
 	}
 	if err := tools.Register(mcpSrv.Registry(), tools.Deps{
@@ -134,11 +90,13 @@ func (s *Server) Run(ctx context.Context) error {
 		Ingestor: ingestor,
 		Sync:     syncOrch,
 	}); err != nil {
-		_ = httpSrv.Shutdown(context.Background())
 		return fmt.Errorf("register tools: %w", err)
 	}
+
 	mcpCtx, mcpCancel := context.WithCancel(ctx)
 	defer mcpCancel()
+
+	errCh := make(chan error, 1)
 	go func() {
 		if err := mcpSrv.Run(mcpCtx); err != nil {
 			errCh <- fmt.Errorf("mcp: %w", err)
@@ -147,44 +105,21 @@ func (s *Server) Run(ctx context.Context) error {
 		errCh <- nil
 	}()
 
-	// Two producers on errCh: the admin HTTP goroutine and the MCP
-	// goroutine. We wait until both have signalled before returning so
-	// callers cannot observe partial shutdown (important for tests that
-	// inspect log sinks).
 	var runErr error
-	pending := 2
-
 	select {
 	case <-ctx.Done():
 	case err := <-errCh:
-		pending--
-		if err != nil {
-			runErr = err
-		}
+		runErr = err
 	}
 	mcpCancel()
 
-	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := httpSrv.Shutdown(shutCtx); err != nil {
-		applog.WithEvent(s.log, "admin.shutdown").Warn("graceful shutdown failed",
-			slog.String("err", err.Error()))
-	}
-
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer drainCancel()
-	for pending > 0 {
-		select {
-		case err := <-errCh:
-			pending--
-			if runErr == nil && err != nil {
-				runErr = err
-			}
-		case <-drainCtx.Done():
-			applog.WithEvent(s.log, "server.stop").Warn("subsystem drain timed out",
-				slog.Int("pending", pending))
-			pending = 0
+	// Drain the MCP goroutine if it hasn't exited yet.
+	select {
+	case err := <-errCh:
+		if runErr == nil && err != nil {
+			runErr = err
 		}
+	default:
 	}
 
 	applog.WithEvent(s.log, "server.stop").Info("server stopping")
@@ -212,20 +147,4 @@ func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store) (*mcp.Serve
 		Name:      "whatsapp-mcp",
 		Version:   Version,
 	}, s.log, reg, pairing)
-}
-
-type hostPort struct {
-	host string
-	port int
-}
-
-// resolveAdminAddr applies the "local-only bind when TRANSPORT=stdio unless
-// explicitly configured" rule. Operators on stdio who want a non-local admin
-// surface must set BIND_ADDR explicitly.
-func (s *Server) resolveAdminAddr() hostPort {
-	host := s.cfg.BindAddr
-	if s.cfg.Transport == config.TransportStdio && !s.cfg.BindAddrExplicit {
-		host = "127.0.0.1"
-	}
-	return hostPort{host: host, port: s.cfg.AdminPort}
 }

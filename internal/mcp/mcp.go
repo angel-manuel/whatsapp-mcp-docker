@@ -44,8 +44,8 @@ const (
 	// ErrAlreadyPaired indicates a pair flow was requested but the
 	// device is already linked. Mirrors wa.ErrAlreadyPaired.
 	ErrAlreadyPaired ErrorCode = "already_paired"
-	// ErrPairInProgress indicates another pair flow is already running
-	// (admin SSE or MCP). Mirrors wa.ErrPairInProgress.
+	// ErrPairInProgress indicates another pair flow is already running.
+	// Mirrors wa.ErrPairInProgress.
 	ErrPairInProgress ErrorCode = "pair_in_progress"
 	// ErrNotPairing indicates the caller asked to drive an in-progress
 	// pair flow but no such flow is active. Mirrors wa.ErrNotPairing.
@@ -54,7 +54,7 @@ const (
 
 // NotPairedMessage is the stable message returned alongside ErrNotPaired.
 // Keep this stable — clients MAY surface it directly.
-const NotPairedMessage = "WhatsApp client is not paired. Pair the device via the admin API before calling tools."
+const NotPairedMessage = "WhatsApp client is not paired. Use the pairing_start MCP tool to pair the device."
 
 // PairingState reports whether whatsmeow is currently paired and logged
 // in. Implementations must be safe for concurrent use; they are called

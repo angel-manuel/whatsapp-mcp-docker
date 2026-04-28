@@ -42,10 +42,6 @@ USER 1000:1000
 
 VOLUME ["/data"]
 
-EXPOSE 8081 8082
-
-# Distroless has no shell/curl, so the binary self-probes /admin/health.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/usr/local/bin/whatsapp-mcp", "--healthcheck"]
+EXPOSE 8081
 
 ENTRYPOINT ["/usr/local/bin/whatsapp-mcp"]

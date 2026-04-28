@@ -8,7 +8,7 @@ import (
 // allVars lists every env var the loader reads. Each test clears them before
 // setting only what it wants, so tests do not leak values across cases.
 var allVars = []string{
-	"TRANSPORT", "BIND_ADDR", "PORT", "ADMIN_PORT", "DATA_DIR",
+	"TRANSPORT", "BIND_ADDR", "PORT", "DATA_DIR",
 	"LOG_LEVEL", "LOG_FORMAT", "AUTH_TOKEN",
 	"MTLS_CA_FILE", "MTLS_CERT_FILE", "MTLS_KEY_FILE",
 	"WHATSAPP_DEVICE_NAME", "FFMPEG_PATH", "ENABLE_PPROF",
@@ -38,9 +38,6 @@ func TestLoad_DefaultsStdio(t *testing.T) {
 	}
 	if cfg.Port != 8081 {
 		t.Errorf("Port = %d, want 8081", cfg.Port)
-	}
-	if cfg.AdminPort != 8082 {
-		t.Errorf("AdminPort = %d, want 8082", cfg.AdminPort)
 	}
 	if cfg.DataDir != "/data" {
 		t.Errorf("DataDir = %q, want /data", cfg.DataDir)
@@ -176,18 +173,6 @@ func TestLoad_PortOutOfRange(t *testing.T) {
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "PORT") {
 		t.Fatalf("want PORT range error, got %v", err)
-	}
-}
-
-func TestLoad_PortAdminPortCollision(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("TRANSPORT", "stdio")
-	t.Setenv("PORT", "9000")
-	t.Setenv("ADMIN_PORT", "9000")
-
-	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "differ") {
-		t.Fatalf("want collision error, got %v", err)
 	}
 }
 

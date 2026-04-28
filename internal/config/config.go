@@ -22,52 +22,43 @@ const (
 
 // Config is the fully-resolved runtime configuration.
 type Config struct {
-	Transport Transport
-	BindAddr  string
-	// BindAddrExplicit reports whether BIND_ADDR was set in the environment
-	// (vs. falling back to the default). The stdio transport uses this to
-	// decide whether the admin listener should be clamped to 127.0.0.1.
-	BindAddrExplicit bool
-	Port             int
-	AdminPort        int
-	DataDir          string
-	LogLevel         string
-	LogFormat        string
-	AuthToken        string
-	MTLSCAFile       string
-	MTLSCertFile     string
-	MTLSKeyFile      string
-	PairDeviceName   string
-	FFmpegPath       string
-	EnablePprof      bool
+	Transport      Transport
+	BindAddr       string
+	Port           int
+	DataDir        string
+	LogLevel       string
+	LogFormat      string
+	AuthToken      string
+	MTLSCAFile     string
+	MTLSCertFile   string
+	MTLSKeyFile    string
+	PairDeviceName string
+	FFmpegPath     string
+	EnablePprof    bool
 }
 
 // Load reads the process environment into a Config and validates it.
 func Load() (*Config, error) {
-	bindAddr, bindAddrExplicit := lookupNonEmpty("BIND_ADDR")
-	if !bindAddrExplicit {
+	bindAddr, bindAddrSet := lookupNonEmpty("BIND_ADDR")
+	if !bindAddrSet {
 		bindAddr = "0.0.0.0"
 	}
 	cfg := &Config{
-		Transport:        Transport(strings.ToLower(getEnv("TRANSPORT", "http"))),
-		BindAddr:         bindAddr,
-		BindAddrExplicit: bindAddrExplicit,
-		DataDir:          getEnv("DATA_DIR", "/data"),
-		LogLevel:         strings.ToLower(getEnv("LOG_LEVEL", "info")),
-		LogFormat:        strings.ToLower(getEnv("LOG_FORMAT", "json")),
-		AuthToken:        os.Getenv("AUTH_TOKEN"),
-		MTLSCAFile:       os.Getenv("MTLS_CA_FILE"),
-		MTLSCertFile:     os.Getenv("MTLS_CERT_FILE"),
-		MTLSKeyFile:      os.Getenv("MTLS_KEY_FILE"),
-		PairDeviceName:   getEnv("WHATSAPP_DEVICE_NAME", "whatsapp-mcp"),
-		FFmpegPath:       getEnv("FFMPEG_PATH", "/usr/bin/ffmpeg"),
+		Transport:      Transport(strings.ToLower(getEnv("TRANSPORT", "http"))),
+		BindAddr:       bindAddr,
+		DataDir:        getEnv("DATA_DIR", "/data"),
+		LogLevel:       strings.ToLower(getEnv("LOG_LEVEL", "info")),
+		LogFormat:      strings.ToLower(getEnv("LOG_FORMAT", "json")),
+		AuthToken:      os.Getenv("AUTH_TOKEN"),
+		MTLSCAFile:     os.Getenv("MTLS_CA_FILE"),
+		MTLSCertFile:   os.Getenv("MTLS_CERT_FILE"),
+		MTLSKeyFile:    os.Getenv("MTLS_KEY_FILE"),
+		PairDeviceName: getEnv("WHATSAPP_DEVICE_NAME", "whatsapp-mcp"),
+		FFmpegPath:     getEnv("FFMPEG_PATH", "/usr/bin/ffmpeg"),
 	}
 
 	var err error
 	if cfg.Port, err = getEnvInt("PORT", 8081); err != nil {
-		return nil, err
-	}
-	if cfg.AdminPort, err = getEnvInt("ADMIN_PORT", 8082); err != nil {
 		return nil, err
 	}
 	if cfg.EnablePprof, err = getEnvBool("ENABLE_PPROF", false); err != nil {
@@ -105,12 +96,6 @@ func (c *Config) Validate() error {
 
 	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("PORT must be 1-65535, got %d", c.Port)
-	}
-	if c.AdminPort < 1 || c.AdminPort > 65535 {
-		return fmt.Errorf("ADMIN_PORT must be 1-65535, got %d", c.AdminPort)
-	}
-	if c.Port == c.AdminPort {
-		return fmt.Errorf("PORT and ADMIN_PORT must differ (both %d)", c.Port)
 	}
 
 	if c.DataDir == "" {
