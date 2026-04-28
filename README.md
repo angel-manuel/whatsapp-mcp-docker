@@ -24,20 +24,8 @@ whatsmeow capabilities not yet exposed — lives in
 
 ## Demo
 
-<!--
-  Drop a screen recording of the MCP being used inside Claude Code here.
-  Recommended formats:
-    - GitHub README:  upload an .mp4/.mov via "Add files" or drag-and-drop
-                      in the GitHub web editor; GitHub rewrites it to a
-                      user-attachment URL automatically. Or commit a .gif
-                      under docs/demo.gif and reference it below.
-    - Docker Hub:     paste a YouTube/Loom link in DOCKERHUB.md (Docker
-                      Hub does not host video; the embed below will not
-                      render there).
--->
-
-<!-- Replace this block with the uploaded video URL or `docs/demo.gif`. -->
-_Demo video coming soon — Claude Code calling `list_chats`, `list_messages`, and `send_message` against a paired account._
+<!-- Demo video -->
+https://github.com/user-attachments/assets/5a947d64-8d06-4a6c-a760-3a785398a84e
 
 ---
 
