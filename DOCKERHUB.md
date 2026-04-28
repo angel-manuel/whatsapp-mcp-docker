@@ -2,7 +2,8 @@
 
 Single-container WhatsApp [Model Context Protocol](https://modelcontextprotocol.io)
 server for AI agents (Claude Code, Cursor, any MCP HTTP client). Pull the
-image, run it, pair your phone, point your agent at it.
+image, run it, and your agent pairs the phone and controls WhatsApp — all
+through MCP.
 
 Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 16
 MCP tools today (cache-backed chat / message reads, contact and group
@@ -47,10 +48,6 @@ docker run -d \
 - `/data` — the only writable volume; holds `session.db` and
   `cache.db`. Preserve it across restarts to keep the paired session.
 
-The admin port (`8082`) stays inside the container by default. Bind
-it explicitly only if you want to drive pairing from the host (see
-[Pair from the host](#pair-from-the-host-optional) below).
-
 ### 2. Configure the MCP in Claude Code
 
 ```bash
@@ -63,16 +60,8 @@ Restart Claude Code, run `/mcp`, and `whatsapp` should be listed as
 `connected`.
 
 Then **ask Claude to pair the device** — it calls `pairing_start`
-through MCP and walks you through it. Phone-number linking is the
-smoothest path in chat:
-
-```
-> Pair my WhatsApp using phone number +15551234567
-```
-
-Claude calls `pairing_start({phone: "+15551234567"})`, hands you back
-the 8-character linking code, and you enter it in
-WhatsApp → Linked devices → **Link with phone number**. Claude polls
+through MCP, gets back the QR code, and renders it for you. Scan it in
+WhatsApp → Linked devices → **Link a device**. Claude polls
 `pairing_complete` until success.
 
 For project-scoped wiring (committed alongside a repo), use
@@ -81,49 +70,8 @@ token — the `Bearer ${WHATSAPP_MCP_AUTH_TOKEN}` form works once you
 export the variable in the shell that launches Claude Code.
 
 > **Claude Desktop** only speaks **stdio** MCP, not HTTP. Run the
-
-> **Claude Desktop** only speaks **stdio** MCP, not HTTP. Run the
 > container with `-e TRANSPORT=stdio` and wrap it with a stdio bridge,
 > or use Claude Code (which speaks HTTP natively).
-
-### Pair from the host (optional)
-
-If you'd rather render the QR in your terminal — useful when Claude
-Code isn't running yet, or when you want a visual scan instead of a
-linking code — bind the admin port to loopback when you start the
-container:
-
-```bash
-# Add this to the docker run above:
-  -p 127.0.0.1:8082:8082 \
-```
-
-Then stream the rotating pair payload and render it as a QR (needs
-`qrencode`):
-
-```bash
-TOKEN=$(cat ~/whatsapp-mcp/.auth_token)
-curl -sN -H "Authorization: Bearer $TOKEN" \
-     -X POST http://localhost:8082/admin/pair/start \
-| while IFS= read -r line; do
-    case "$line" in
-      'data: '*'"code":"'*)
-        code=$(printf '%s' "$line" | sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
-        clear; echo "Scan with WhatsApp → Linked devices → Link a device"
-        printf '%s' "$code" | qrencode -t ANSIUTF8 ;;
-      'event: success') echo "paired."; break ;;
-    esac
-  done
-```
-
-Phone-number linking from the host instead of QR:
-
-```bash
-curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-     -X POST http://localhost:8082/admin/pair/phone \
-     -d '{"phone":"+15551234567"}'
-# → { "linking_code": "ABCD-EFGH" } — enter in WhatsApp → Linked devices.
-```
 
 ## Configuration
 

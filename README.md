@@ -1,9 +1,9 @@
 # whatsapp-mcp-docker
 
 A single-container WhatsApp [Model Context Protocol](https://modelcontextprotocol.io)
-server. Pull the image, run it, pair your phone, and your AI agent (Claude
-Code, or any MCP-speaking client) can read and send WhatsApp messages on
-your behalf.
+server. Pull the image, run it, and your AI agent (Claude Code, or any
+MCP-speaking client) can pair your phone and then read and send WhatsApp
+messages on your behalf — all through MCP.
 
 Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Everything —
 MCP transport, pairing, session persistence — runs in **one Go process**
@@ -61,9 +61,7 @@ docker run -d \
 ```
 
 `8081` is the MCP transport. The admin port (`8082`) stays inside the
-container by default — bind it explicitly only if you want to drive
-pairing from the host (see [Pair from the host](#pair-from-the-host-optional)
-below).
+container and is used internally for pairing and health checks.
 
 ### 2. Configure the MCP in Claude Code
 
@@ -75,17 +73,9 @@ claude mcp add --transport http whatsapp http://localhost:8081/mcp \
 
 Restart Claude Code, run `/mcp`, and `whatsapp` should be listed.
 
-Then just **ask Claude to pair the device.** It calls `pairing_start`
-through MCP and walks you through it. Phone-number linking is the
-smoothest path in chat:
-
-```
-> Pair my WhatsApp using phone number +15551234567
-```
-
-Claude calls `pairing_start({phone: "+15551234567"})`, hands you back
-the 8-character linking code, and you enter it in
-WhatsApp → Linked devices → **Link with phone number**. Claude polls
+Then **ask Claude to pair the device.** It calls `pairing_start`
+through MCP, gets back the QR code, and renders it for you. Scan it in
+WhatsApp → Linked devices → **Link a device**. Claude polls
 `pairing_complete` until the link succeeds; the session then survives
 container restarts (everything lives under `/data`).
 
@@ -99,39 +89,6 @@ launches Claude Code.
 > HTTP. Run the container with `-e TRANSPORT=stdio` and wrap it with a
 > stdio-bridging launcher (or just use Claude Code, which speaks HTTP
 > natively).
-
-### Pair from the host (optional)
-
-If you'd rather render the QR in your terminal — useful when Claude
-Code isn't running yet, or when you want a visual scan instead of a
-linking code — bind the admin port to loopback when you start the
-container:
-
-```bash
-# Add this to the docker run above:
-  -p 127.0.0.1:8082:8082 \
-```
-
-Then stream the rotating pair payload and render it as a QR (needs
-`qrencode`: `brew install qrencode` / `apt install qrencode`):
-
-```bash
-TOKEN=$(cat ~/whatsapp-mcp/.auth_token)
-curl -sN -H "Authorization: Bearer $TOKEN" \
-     -X POST http://localhost:8082/admin/pair/start \
-| while IFS= read -r line; do
-    case "$line" in
-      'data: '*'"code":"'*)
-        code=$(printf '%s' "$line" | sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
-        clear; echo "Scan with WhatsApp → Linked devices → Link a device"
-        printf '%s' "$code" | qrencode -t ANSIUTF8 ;;
-      'event: success') echo "paired."; break ;;
-    esac
-  done
-```
-
-The `Makefile` ships a ready-made `make pair-qr` target that does
-exactly this against the running container.
 
 ---
 
@@ -194,23 +151,22 @@ Python reference's argument shapes are tracked in
 
 ## Pairing reference
 
-There are two surfaces for the link flow, both backed by the same
-`wa.Client.StartPairing` and mutually exclusive (whoever opens the flow
-holds it; the other receives `pair_in_progress`):
+Pairing is driven by the **MCP tools** (`pairing_start`,
+`pairing_complete`) — the agent calls `pairing_start`, receives the QR
+code, renders it, and polls `pairing_complete` until the link succeeds.
 
-- **Admin HTTP / SSE** (`POST /admin/pair/start`,
-  `POST /admin/pair/phone`, `POST /admin/unpair`,
-  `GET /admin/events`, `GET /admin/status`) — for an external UI broker
-  rendering QR / linking codes.
-- **MCP tools** (`pairing_start`, `pairing_complete`) — for an agent
-  driving the flow itself through the same MCP transport.
+An **Admin HTTP / SSE** surface also exists (`POST /admin/pair/start`,
+`POST /admin/unpair`, `GET /admin/events`, `GET /admin/status`) for
+external UI brokers; it shares the same underlying flow and is mutually
+exclusive with the MCP path (whoever opens the flow holds it; the other
+receives `pair_in_progress`).
 
 `ping`, `pairing_start`, and `pairing_complete` are exempt from the
 `not_paired` gate; every other tool returns a structured `not_paired`
 error until pairing succeeds.
 
-Full pairing contract — events, error codes, phone-link semantics — is
-in [REQUIREMENTS.md §Pairing](REQUIREMENTS.md#pairing).
+Full pairing contract — events, error codes — is in
+[REQUIREMENTS.md §Pairing](REQUIREMENTS.md#pairing).
 
 ## Operational notes
 
