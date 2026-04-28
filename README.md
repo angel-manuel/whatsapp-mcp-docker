@@ -48,15 +48,15 @@ You need: Docker, a phone with WhatsApp, and Claude Code.
 ### 1. Run the container
 
 ```bash
-mkdir -p ~/whatsapp-mcp/data
-( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/data/.auth_token )
+mkdir -p ~/whatsapp-mcp
+( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/.auth_token )
 
 docker run -d \
   --name whatsapp-mcp \
   --restart unless-stopped \
   -p 8081:8081 \
-  -v ~/whatsapp-mcp/data:/data \
-  -e AUTH_TOKEN="$(cat ~/whatsapp-mcp/data/.auth_token)" \
+  -v whatsapp-mcp-data:/data \
+  -e AUTH_TOKEN="$(cat ~/whatsapp-mcp/.auth_token)" \
   docker.io/angelmanuel/whatsapp-mcp:latest
 ```
 
@@ -69,7 +69,7 @@ below).
 
 ```bash
 claude mcp add --transport http whatsapp http://localhost:8081/mcp \
-  --header "Authorization: Bearer $(cat ~/whatsapp-mcp/data/.auth_token)" \
+  --header "Authorization: Bearer $(cat ~/whatsapp-mcp/.auth_token)" \
   --scope user
 ```
 
@@ -116,7 +116,7 @@ Then stream the rotating pair payload and render it as a QR (needs
 `qrencode`: `brew install qrencode` / `apt install qrencode`):
 
 ```bash
-TOKEN=$(cat ~/whatsapp-mcp/data/.auth_token)
+TOKEN=$(cat ~/whatsapp-mcp/.auth_token)
 curl -sN -H "Authorization: Bearer $TOKEN" \
      -X POST http://localhost:8082/admin/pair/start \
 | while IFS= read -r line; do
@@ -217,14 +217,18 @@ in [REQUIREMENTS.md §Pairing](REQUIREMENTS.md#pairing).
 - **One process per `/data` volume.** Ratchet state rotates on every
   message; the binary acquires an exclusive `flock` on `/data/.lock` at
   startup and exits non-zero if another process owns it.
-- **`/data` is the only persistent volume.** Delete it to fully reset
-  the device identity; preserve it across container restarts to avoid
+- **`/data` is the only persistent volume.** Run `docker volume rm whatsapp-mcp-data`
+  to fully reset the device identity; preserve it across container restarts to avoid
   re-pairing.
 - **Read-only root filesystem compatible** — mount `/` as `ro`,
   `/data` and `/tmp` as `rw`.
 - **Healthcheck is built-in** — `whatsapp-mcp --healthcheck` probes
   `http://127.0.0.1:$ADMIN_PORT/admin/health`. No shell or curl needed
   in the distroless image.
+- **Rootless Podman**: the image runs as UID 1000 (non-root). Named volumes
+  are initialised with the correct ownership automatically. If you switch to a
+  bind mount instead, add `--userns=keep-id` so the host directory is writable
+  by the container user.
 - **No telemetry.** The binary does not phone home.
 
 ## Building locally
@@ -235,7 +239,7 @@ make test          # unit tests with -race
 make image         # docker.io/angelmanuel/whatsapp-mcp:dev (distroless)
 make image-slim    # …:dev-slim  (debian:bookworm-slim + ffmpeg)
 make run-local     # build + run with a local ./data volume
-make run-master    # pull :master, run detached, mint a token under ./data
+make run-master    # pull :master, run detached, mint a token at ./.auth_token
 make pair-qr       # render QR for the running container in the terminal
 ```
 
