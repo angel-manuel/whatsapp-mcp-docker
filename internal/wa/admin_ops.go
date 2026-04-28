@@ -12,12 +12,12 @@ import (
 	"go.mau.fi/whatsmeow/store"
 )
 
-// pairSession tracks the lifetime of a /admin/pair/start flow. Only one can
-// be active at a time, guarded by Client.adminMu. After the flow goroutine
-// exits the session is *not* nil-ed out — its observation fields preserve
-// the terminal outcome so callers polling via PairLatest / PairWaitNext
-// after the flow ended still see the result. The next StartPairing or
-// Unpair replaces or clears the pointer.
+// pairSession tracks the lifetime of a pairing flow. Only one can be active
+// at a time, guarded by Client.adminMu. After the flow goroutine exits the
+// session is *not* nil-ed out — its observation fields preserve the terminal
+// outcome so callers polling via PairLatest / PairWaitNext after the flow
+// ended still see the result. The next StartPairing or Unpair replaces or
+// clears the pointer.
 type pairSession struct {
 	cancel context.CancelFunc
 	out    chan PairEvent
