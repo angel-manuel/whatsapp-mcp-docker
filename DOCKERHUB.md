@@ -31,15 +31,15 @@ Both variants are multi-arch: `linux/amd64`, `linux/arm64`.
 ### 1. Run the container
 
 ```bash
-mkdir -p ~/whatsapp-mcp/data
-( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/data/.auth_token )
+mkdir -p ~/whatsapp-mcp
+( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/.auth_token )
 
 docker run -d \
   --name whatsapp-mcp \
   --restart unless-stopped \
   -p 8081:8081 \
-  -v ~/whatsapp-mcp/data:/data \
-  -e AUTH_TOKEN="$(cat ~/whatsapp-mcp/data/.auth_token)" \
+  -v whatsapp-mcp-data:/data \
+  -e AUTH_TOKEN="$(cat ~/whatsapp-mcp/.auth_token)" \
   docker.io/angelmanuel/whatsapp-mcp:latest
 ```
 
@@ -55,7 +55,7 @@ it explicitly only if you want to drive pairing from the host (see
 
 ```bash
 claude mcp add --transport http whatsapp http://localhost:8081/mcp \
-  --header "Authorization: Bearer $(cat ~/whatsapp-mcp/data/.auth_token)" \
+  --header "Authorization: Bearer $(cat ~/whatsapp-mcp/.auth_token)" \
   --scope user
 ```
 
@@ -102,7 +102,7 @@ Then stream the rotating pair payload and render it as a QR (needs
 `qrencode`):
 
 ```bash
-TOKEN=$(cat ~/whatsapp-mcp/data/.auth_token)
+TOKEN=$(cat ~/whatsapp-mcp/.auth_token)
 curl -sN -H "Authorization: Bearer $TOKEN" \
      -X POST http://localhost:8082/admin/pair/start \
 | while IFS= read -r line; do
@@ -165,6 +165,8 @@ not-yet-supported list:
 - **One process per `/data`.** Ratchet state rotates on every message;
   startup acquires an exclusive `flock` on `/data/.lock` and exits
   non-zero if another process owns it.
+- **Rootless Podman**: image is non-root (UID 1000). Named volumes are
+  chowned automatically; bind mounts require `--userns=keep-id`.
 - **No telemetry.** The binary does not phone home.
 
 ## Source & support

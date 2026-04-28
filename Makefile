@@ -9,14 +9,14 @@ LDFLAGS     := -s -w -X main.version=$(VERSION)
 # builds the distroless variant tagged `:dev`.
 IMAGE       ?= docker.io/angelmanuel/whatsapp-mcp
 IMAGE_TAG   ?= dev
-DATA_DIR    ?= $(CURDIR)/data
+VOLUME_NAME ?= whatsapp-mcp-data
 
 # Smoke-test the published :master image as a Claude Code MCP server.
 TEST_IMAGE_TAG ?= master
 TEST_CONTAINER ?= whatsapp-mcp-test
-TOKEN_FILE     := $(DATA_DIR)/.auth_token
+TOKEN_FILE     := $(CURDIR)/.auth_token
 
-.PHONY: build test lint vet tidy clean image image-slim run-local run-master stop-master pair-qr
+.PHONY: build test lint vet tidy clean image image-slim run-local run-master stop-master volume-rm pair-qr
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -52,34 +52,33 @@ image-slim:
 	  .
 
 run-local: image
-	@mkdir -p $(DATA_DIR)
 	docker run --rm -it \
 	  --name whatsapp-mcp-local \
 	  -p 8081:8081 -p 8082:8082 \
-	  -v $(DATA_DIR):/data \
+	  -v $(VOLUME_NAME):/data \
 	  -e TRANSPORT=$${TRANSPORT:-http} \
 	  -e AUTH_TOKEN=$${AUTH_TOKEN:-devtoken} \
 	  $(IMAGE):$(IMAGE_TAG)
 
 # Pull and run the published :master image detached, with a stable AUTH_TOKEN
-# persisted under $(DATA_DIR)/.auth_token. Pair the resulting container by:
-#   1) export WHATSAPP_MCP_AUTH_TOKEN=$$(cat $(DATA_DIR)/.auth_token)
+# persisted at $(TOKEN_FILE). Pair the resulting container by:
+#   1) export WHATSAPP_MCP_AUTH_TOKEN=$$(cat $(TOKEN_FILE))
 #   2) restart Claude Code so .mcp.json picks it up
 #   3) make pair-qr   (in another terminal)
 run-master:
-	@mkdir -p $(DATA_DIR)
 	@if [ ! -s $(TOKEN_FILE) ]; then \
 	  umask 077 && openssl rand -hex 32 > $(TOKEN_FILE) && \
 	  echo "generated $(TOKEN_FILE)"; \
 	fi
 	docker pull $(IMAGE):$(TEST_IMAGE_TAG)
 	-docker rm -f $(TEST_CONTAINER) >/dev/null 2>&1
+	# Podman (rootless): add --userns=keep-id to the run command below
+	# (required when using bind mounts; named volumes handle ownership automatically)
 	docker run -d \
 	  --name $(TEST_CONTAINER) \
 	  --restart unless-stopped \
-	  --userns=keep-id \
 	  -p 8081:8081 -p 8082:8082 \
-	  -v $(DATA_DIR):/data \
+	  -v $(VOLUME_NAME):/data \
 	  -e AUTH_TOKEN=$$(cat $(TOKEN_FILE)) \
 	  $(IMAGE):$(TEST_IMAGE_TAG)
 	@echo
@@ -93,6 +92,9 @@ run-master:
 
 stop-master:
 	-docker rm -f $(TEST_CONTAINER)
+
+volume-rm:
+	docker volume rm $(VOLUME_NAME)
 
 # Stream /admin/pair/start and render each rotating pair payload as a QR in
 # the terminal. Requires qrencode (apt: qrencode, brew: qrencode).
