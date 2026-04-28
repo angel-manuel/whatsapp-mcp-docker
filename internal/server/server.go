@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/config"
@@ -16,6 +17,10 @@ import (
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/tools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
+
+// shutdownTimeout bounds how long we wait for the MCP goroutine to exit after
+// context cancellation so we don't block indefinitely on a slow consumer.
+const shutdownTimeout = 10 * time.Second
 
 // Version is baked into the MCP server identity. main overrides this via
 // ldflags at build time.
@@ -113,13 +118,16 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	mcpCancel()
 
-	// Drain the MCP goroutine if it hasn't exited yet.
+	// Wait for the MCP goroutine to exit so callers observe a clean shutdown.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer drainCancel()
 	select {
 	case err := <-errCh:
 		if runErr == nil && err != nil {
 			runErr = err
 		}
-	default:
+	case <-drainCtx.Done():
+		applog.WithEvent(s.log, "server.stop").Warn("mcp goroutine drain timed out")
 	}
 
 	applog.WithEvent(s.log, "server.stop").Info("server stopping")
