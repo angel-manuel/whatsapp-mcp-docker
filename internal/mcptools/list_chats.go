@@ -17,7 +17,7 @@ const listChatsDefaultLimit = 20
 var listChatsInputSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "query":                {"type": ["string","null"], "description": "Case-insensitive substring match on chat name or JID."},
+    "query":                {"type": ["string","null"], "description": "Case-insensitive substring match on the chat's stored title (or JID). 1:1 chats usually have no title, so searching a person's name here WILL MISS their direct chat — use search_contacts then get_contact_chats instead. query is for named groups."},
     "limit":                {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
     "page":                 {"type": "integer", "minimum": 0, "default": 0},
     "include_last_message": {"type": "boolean", "default": true},
@@ -51,11 +51,21 @@ type listChatsOutput struct {
 	Chats []ChatDTO `json:"chats"`
 }
 
+// Intended tool description:
+//
+//	List WhatsApp chats cached locally. Supports substring search, pagination,
+//	and optional inclusion of each chat's last message preview. NOTE: query
+//	matches the chat's stored title only. 1:1 chats usually have no title, so
+//	searching a person's name here WILL MISS their direct chat — use
+//	search_contacts → get_contact_chats instead. query is for named groups.
 func registerListChats(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "list_chats",
 		Description: "List WhatsApp chats cached locally. Supports substring search, " +
-			"pagination, and optional inclusion of each chat's last message preview.",
+			"pagination, and optional inclusion of each chat's last message preview. " +
+			"NOTE: query matches the chat's stored title only. 1:1 chats usually have " +
+			"no title, so searching a person's name here WILL MISS their direct chat — " +
+			"use search_contacts → get_contact_chats instead. query is for named groups.",
 		InputSchema:  listChatsInputSchema,
 		OutputSchema: listChatsOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
