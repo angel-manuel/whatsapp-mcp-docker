@@ -14,6 +14,32 @@ import (
 
 const listMessagesDefaultLimit = 20
 
+const (
+	// directionIncoming / directionOutgoing are the explicit message
+	// directions derived from is_from_me, so callers report direction from
+	// data instead of re-interpreting the bool.
+	directionIncoming = "incoming"
+	directionOutgoing = "outgoing"
+	// deliveryStatusUnknown is the stub returned for every message until the
+	// cache ingests WhatsApp receipt/ack stanzas — the messages table has no
+	// delivery columns yet. It is deliberately truthful: we never invent
+	// "delivered"/"read" the agent would otherwise have to infer.
+	deliveryStatusUnknown = "unknown"
+)
+
+// messageContactJoins joins the contacts + nicknames tables on the message
+// sender so the canonical SELECT can resolve the sender JID to a display
+// name in a single query (no N+1 lookups). Sender columns are COALESCE'd to
+// empty when the sender has no contact/nickname row.
+const messageContactJoins = `
+LEFT JOIN contacts ct  ON ct.jid = m.sender_jid
+LEFT JOIN nicknames nk ON nk.jid = m.sender_jid`
+
+// messageSenderNameColumns is the trailing column list every canonical
+// message SELECT appends so scanMessageRow can resolve the sender name.
+const messageSenderNameColumns = `COALESCE(ct.push_name,''), COALESCE(ct.business_name,''),
+       COALESCE(ct.first_name,''), COALESCE(ct.full_name,''), COALESCE(nk.nickname,'')`
+
 var listMessagesInputSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -134,7 +160,7 @@ func handleListMessages(ctx context.Context, store *cache.Store, in listMessages
 		fromClause = `
 FROM messages m
 JOIN messages_fts f ON f.rowid = m.rowid
-LEFT JOIN chats c ON c.jid = m.chat_jid`
+LEFT JOIN chats c ON c.jid = m.chat_jid` + messageContactJoins
 		// Wrap user input in a phrase so "foo bar" acts as a phrase match,
 		// which is closer to the Python LIKE "%query%" semantics than FTS's
 		// default whitespace-as-AND. Trim stray quotes before re-wrapping.
@@ -144,7 +170,7 @@ LEFT JOIN chats c ON c.jid = m.chat_jid`
 	} else {
 		fromClause = `
 FROM messages m
-LEFT JOIN chats c ON c.jid = m.chat_jid`
+LEFT JOIN chats c ON c.jid = m.chat_jid` + messageContactJoins
 	}
 
 	whereSQL := ""
@@ -154,11 +180,12 @@ LEFT JOIN chats c ON c.jid = m.chat_jid`
 
 	query := fmt.Sprintf(`
 SELECT m.id, m.chat_jid, c.name, m.sender_jid, m.body, m.ts, m.is_from_me,
-       m.kind, m.media_filename, m.media_length
+       m.kind, m.media_filename, m.media_length,
+       %s
 %s
 %s
 ORDER BY m.ts DESC, m.id ASC
-LIMIT ? OFFSET ?`, fromClause, whereSQL)
+LIMIT ? OFFSET ?`, messageSenderNameColumns, fromClause, whereSQL)
 	params = append(params, limit, offset)
 
 	rows, err := store.DB().QueryContext(ctx, query, params...)
@@ -183,9 +210,12 @@ LIMIT ? OFFSET ?`, fromClause, whereSQL)
 
 // scanMessageRow decodes one row selected with the canonical message
 // SELECT: (id, chat_jid, chat_name, sender_jid, body, ts, is_from_me,
-// kind, media_filename, media_length). chat_name is COALESCE'd to empty
-// when the chats row is missing (defensive — the ingestor always
-// upserts, but tests sometimes poke fixtures directly).
+// kind, media_filename, media_length) followed by the five sender-name
+// columns from messageSenderNameColumns (push_name, business_name,
+// first_name, full_name, nickname). chat_name is COALESCE'd to empty when
+// the chats row is missing (defensive — the ingestor always upserts, but
+// tests sometimes poke fixtures directly); the sender-name columns are
+// COALESCE'd in SQL so a sender with no contact row scans to empty strings.
 func scanMessageRow(rows *sql.Rows) (MessageDTO, error) {
 	var (
 		id, chatJID, sender, body string
@@ -194,25 +224,57 @@ func scanMessageRow(rows *sql.Rows) (MessageDTO, error) {
 		isFromMe                  int
 		kind, mediaFilename       string
 		mediaLength               int64
+		pushName, businessName    string
+		firstName, fullName       string
+		nickname                  string
 	)
-	if err := rows.Scan(&id, &chatJID, &chatName, &sender, &body, &ts, &isFromMe, &kind, &mediaFilename, &mediaLength); err != nil {
+	if err := rows.Scan(&id, &chatJID, &chatName, &sender, &body, &ts, &isFromMe, &kind, &mediaFilename, &mediaLength,
+		&pushName, &businessName, &firstName, &fullName, &nickname); err != nil {
 		return MessageDTO{}, err
 	}
-	return buildMessageDTO(id, chatJID, chatName.String, sender, body, ts, isFromMe != 0, kind, mediaFilename, mediaLength), nil
+	senderName := resolveSenderName(cache.ContactRow{
+		JID: sender, PushName: pushName, BusinessName: businessName,
+		FirstName: firstName, FullName: fullName, Nickname: nickname,
+	})
+	return buildMessageDTO(id, chatJID, chatName.String, sender, senderName, body, ts, isFromMe != 0, kind, mediaFilename, mediaLength), nil
+}
+
+// resolveSenderName resolves a sender contact row to a display name, or ""
+// when no real name is known. It returns "" rather than the phone/JID
+// fallback so MessageDTO.SenderName is null (not a pseudo-name echoing the
+// JID) for senders with no contact or nickname row.
+func resolveSenderName(row cache.ContactRow) string {
+	if row.Nickname == "" && row.FullName == "" && row.PushName == "" &&
+		row.FirstName == "" && row.BusinessName == "" {
+		return ""
+	}
+	return row.DisplayName()
 }
 
 // buildMessageDTO is shared across list_messages, get_message_context,
 // and get_last_interaction so timestamp / media-mapping stays identical
-// across every surface.
-func buildMessageDTO(id, chatJID, chatName, sender, body string, ts int64, isFromMe bool, kind, mediaFilename string, mediaLength int64) MessageDTO {
+// across every surface. It also stamps the enriched delivery-state fields
+// (see MessageDTO) so callers report direction and delivery state from data
+// rather than interpreting is_from_me or inferring checkmarks: Direction is
+// derived from isFromMe, SenderName carries the resolved sender display name
+// ("" → null), and DeliveryStatus is the honest "unknown" stub until the
+// cache ingests WhatsApp receipt/ack stanzas.
+func buildMessageDTO(id, chatJID, chatName, sender, senderName, body string, ts int64, isFromMe bool, kind, mediaFilename string, mediaLength int64) MessageDTO {
+	direction := directionIncoming
+	if isFromMe {
+		direction = directionOutgoing
+	}
 	dto := MessageDTO{
-		ID:        id,
-		ChatJID:   chatJID,
-		ChatName:  stringOrNil(chatName),
-		Sender:    sender,
-		Content:   body,
-		Timestamp: tsISOOrNil(ts),
-		IsFromMe:  isFromMe,
+		ID:             id,
+		ChatJID:        chatJID,
+		ChatName:       stringOrNil(chatName),
+		Sender:         sender,
+		SenderName:     stringOrNil(senderName),
+		Content:        body,
+		Timestamp:      tsISOOrNil(ts),
+		IsFromMe:       isFromMe,
+		Direction:      direction,
+		DeliveryStatus: deliveryStatusUnknown,
 	}
 	media := mapKindToMediaType(kind)
 	if media == "" {

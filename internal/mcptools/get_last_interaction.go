@@ -75,9 +75,10 @@ func handleGetLastInteraction(ctx context.Context, store *cache.Store, in getLas
 
 	query := `
 SELECT m.id, m.chat_jid, c.name, m.sender_jid, m.body, m.ts, m.is_from_me,
-       m.kind, m.media_filename, m.media_length
+       m.kind, m.media_filename, m.media_length,
+       ` + messageSenderNameColumns + `
 FROM messages m
-LEFT JOIN chats c ON c.jid = m.chat_jid
+LEFT JOIN chats c ON c.jid = m.chat_jid` + messageContactJoins + `
 WHERE m.sender_jid = ? OR m.chat_jid = ?
 ORDER BY m.ts DESC, m.id DESC
 LIMIT 1`

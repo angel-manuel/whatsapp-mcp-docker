@@ -98,23 +98,28 @@ func handleGetMessageContext(ctx context.Context, store *cache.Store, in getMess
 	// collide across chats. Pick the first match (smallest chat_jid) so
 	// the result is deterministic.
 	var (
-		chatJID, sender, body string
-		ts                    int64
-		isFromMe              int
-		kind, mediaFilename   string
-		mediaLength           int64
-		chatName              sql.NullString
+		chatJID, sender, body  string
+		ts                     int64
+		isFromMe               int
+		kind, mediaFilename    string
+		mediaLength            int64
+		chatName               sql.NullString
+		pushName, businessName string
+		firstName, fullName    string
+		nickname               string
 	)
 	targetSQL := `
 SELECT m.chat_jid, m.sender_jid, m.body, m.ts, m.is_from_me,
-       m.kind, m.media_filename, m.media_length, c.name
+       m.kind, m.media_filename, m.media_length, c.name,
+       ` + messageSenderNameColumns + `
 FROM messages m
-LEFT JOIN chats c ON c.jid = m.chat_jid
+LEFT JOIN chats c ON c.jid = m.chat_jid` + messageContactJoins + `
 WHERE m.id = ?
 ORDER BY m.chat_jid ASC
 LIMIT 1`
 	err := store.DB().QueryRowContext(ctx, targetSQL, in.MessageID).Scan(
 		&chatJID, &sender, &body, &ts, &isFromMe, &kind, &mediaFilename, &mediaLength, &chatName,
+		&pushName, &businessName, &firstName, &fullName, &nickname,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return mcp.NotFoundError(fmt.Sprintf("message %q not found", in.MessageID)), nil
@@ -123,8 +128,12 @@ LIMIT 1`
 		return mcp.InternalError(fmt.Sprintf("get_message_context: %v", err)), nil
 	}
 
+	senderName := resolveSenderName(cache.ContactRow{
+		JID: sender, PushName: pushName, BusinessName: businessName,
+		FirstName: firstName, FullName: fullName, Nickname: nickname,
+	})
 	out := getMessageContextOutput{
-		Message: buildMessageDTO(in.MessageID, chatJID, chatName.String, sender, body, ts, isFromMe != 0, kind, mediaFilename, mediaLength),
+		Message: buildMessageDTO(in.MessageID, chatJID, chatName.String, sender, senderName, body, ts, isFromMe != 0, kind, mediaFilename, mediaLength),
 		Before:  []MessageDTO{},
 		After:   []MessageDTO{},
 	}
@@ -132,9 +141,10 @@ LIMIT 1`
 	if before > 0 {
 		rows, err := store.DB().QueryContext(ctx, `
 SELECT m.id, m.chat_jid, c.name, m.sender_jid, m.body, m.ts, m.is_from_me,
-       m.kind, m.media_filename, m.media_length
+       m.kind, m.media_filename, m.media_length,
+       `+messageSenderNameColumns+`
 FROM messages m
-LEFT JOIN chats c ON c.jid = m.chat_jid
+LEFT JOIN chats c ON c.jid = m.chat_jid`+messageContactJoins+`
 WHERE m.chat_jid = ? AND (m.ts < ? OR (m.ts = ? AND m.id < ?))
 ORDER BY m.ts DESC, m.id DESC
 LIMIT ?`, chatJID, ts, ts, in.MessageID, before)
@@ -152,9 +162,10 @@ LIMIT ?`, chatJID, ts, ts, in.MessageID, before)
 	if after > 0 {
 		rows, err := store.DB().QueryContext(ctx, `
 SELECT m.id, m.chat_jid, c.name, m.sender_jid, m.body, m.ts, m.is_from_me,
-       m.kind, m.media_filename, m.media_length
+       m.kind, m.media_filename, m.media_length,
+       `+messageSenderNameColumns+`
 FROM messages m
-LEFT JOIN chats c ON c.jid = m.chat_jid
+LEFT JOIN chats c ON c.jid = m.chat_jid`+messageContactJoins+`
 WHERE m.chat_jid = ? AND (m.ts > ? OR (m.ts = ? AND m.id > ?))
 ORDER BY m.ts ASC, m.id ASC
 LIMIT ?`, chatJID, ts, ts, in.MessageID, after)
