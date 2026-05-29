@@ -39,6 +39,13 @@ type getContactChatsInput struct {
 	Page       int    `json:"page"`
 }
 
+// Argument contract:
+//   - `contact_jid` (required) is a person's identity (phone JID or @lid),
+//     distinct from a chat key (chat_jid).
+//   - Pagination is `limit` (1–200, default 20) + `page` (0-based).
+//   - Always ordered most-recent-first (last_message_ts DESC); there is no
+//     sort parameter.
+//
 // Intended tool description:
 //
 // Find the full conversation with a contact. Use this to locate the conversation

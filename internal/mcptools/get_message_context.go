@@ -21,8 +21,8 @@ var getMessageContextInputSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "message_id": {"type": "string", "minLength": 1},
-    "before":     {"type": "integer", "minimum": 0, "maximum": 100, "default": 5},
-    "after":      {"type": "integer", "minimum": 0, "maximum": 100, "default": 5}
+    "before":     {"type": "integer", "minimum": 0, "maximum": 100, "default": 5, "description": "Number of messages to fetch immediately BEFORE the target — an integer COUNT, not a timestamp (contrast list_messages, where before is an ISO date)."},
+    "after":      {"type": "integer", "minimum": 0, "maximum": 100, "default": 5, "description": "Number of messages to fetch immediately AFTER the target — an integer COUNT, not a timestamp."}
   },
   "required": ["message_id"],
   "additionalProperties": false
@@ -50,13 +50,21 @@ type getMessageContextOutput struct {
 	After   []MessageDTO `json:"after"`
 }
 
+// Argument contract:
+//   - `message_id` (required) identifies the target message.
+//   - `before`/`after` are integer COUNTS (window sizes, 0–100, default 5),
+//     NOT timestamps — unlike list_messages where before/after are ISO dates.
+//   - The returned `before` and `after` arrays are in chronological order
+//     (oldest→newest); `message` is the target itself.
+//
 // Intended tool description addendum (freshness contract, verbatim):
 // "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerGetMessageContext(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "get_message_context",
 		Description: "Fetch the N messages immediately before and after a target message, " +
-			"scoped to the same chat_jid as the target. " +
+			"scoped to the same chat_jid as the target. before/after are integer counts " +
+			"(window sizes), not timestamps; returned before/after arrays are chronological. " +
 			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
 			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
 			"poll cache_sync_status until finished → read.",

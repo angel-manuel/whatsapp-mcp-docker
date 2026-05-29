@@ -31,6 +31,11 @@ type getDirectChatByContactInput struct {
 	ContactJID string `json:"contact_jid"`
 }
 
+// Argument contract:
+//   - `contact_jid` (required) is a person's identity — a full JID or a bare
+//     phone number/fragment (exact match first, then LIKE fallback).
+//   - Resolves a single direct (non-group) chat; no pagination or sort.
+//
 // Intended tool description (verbatim):
 //
 // Resolve {contact_jid} to the 1:1 chat. NOTE: a contact can have separate
