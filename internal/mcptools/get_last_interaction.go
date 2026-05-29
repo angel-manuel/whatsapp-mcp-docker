@@ -27,6 +27,17 @@ type getLastInteractionInput struct {
 	ContactJID string `json:"contact_jid"`
 }
 
+// Intended tool description (verbatim):
+//
+//	Return the most recent cached message exchanged with the contact —
+//	either in the 1:1 chat keyed on their JID or any group where they were
+//	the sender. is_from_me reflects the sending account/device, not the
+//	speaker's role. With multi-device or business accounts the same person
+//	can send from multiple JIDs, and an operator controlling both ends sees
+//	their own JID on both sides. Don't infer who said what from message
+//	content — trust sender JID + is_from_me. Returns only the single most
+//	recent message.
+//
 // Intended tool description addendum (freshness contract, verbatim):
 // "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerGetLastInteraction(reg *mcp.Registry, store *cache.Store) error {
@@ -34,6 +45,11 @@ func registerGetLastInteraction(reg *mcp.Registry, store *cache.Store) error {
 		Name: "get_last_interaction",
 		Description: "Return the most recent cached message exchanged with the contact — " +
 			"either in the 1:1 chat keyed on their JID or any group where they were the sender. " +
+			"is_from_me reflects the sending account/device, not the speaker's role. " +
+			"With multi-device or business accounts the same person can send from multiple JIDs, " +
+			"and an operator controlling both ends sees their own JID on both sides. " +
+			"Don't infer who said what from message content — trust sender JID + is_from_me. " +
+			"Returns only the single most recent message. " +
 			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
 			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
 			"poll cache_sync_status until finished → read.",
