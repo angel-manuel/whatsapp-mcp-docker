@@ -39,11 +39,34 @@ type getContactChatsInput struct {
 	Page       int    `json:"page"`
 }
 
+// Intended tool description:
+//
+// Find the full conversation with a contact. Use this to locate the conversation
+// when a contact may exist under multiple JIDs (phone JID + @lid privacy LID): it
+// matches both the direct chat keyed on the JID you pass AND every other chat where
+// that JID is a recorded sender, so you surface the contact's threads instead of
+// having to guess the exact chat key. This is the canonical entry point and
+// recommended FIRST call when answering "what's the latest with this person?", "did
+// they respond?", or "show me my conversation / chat history with them". Returns
+// every cached chat (direct + groups) involving the given contact JID, ordered
+// most-recent-first, so the latest thread surfaces at the top. If you only have one
+// of a contact's identities, call this with it; pass the other JID in a follow-up
+// call to cover the remaining identity. Keywords: conversation, thread, full
+// history, all chats, latest message, did they reply.
 func registerGetContactChats(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "get_contact_chats",
-		Description: "List every cached chat (direct + groups) where the given contact has " +
-			"either sent a message or is the counterparty JID.",
+		Description: "Find the full conversation with a contact. Use this to locate the conversation " +
+			"when a contact may exist under multiple JIDs (phone JID + @lid privacy LID): it matches " +
+			"both the direct chat keyed on the JID you pass AND every other chat where that JID is a " +
+			"recorded sender, so you surface the contact's threads instead of having to guess the exact " +
+			"chat key. This is the canonical entry point and recommended FIRST call when answering " +
+			"\"what's the latest with this person?\", \"did they respond?\", or \"show me my conversation " +
+			"/ chat history with them\". Returns every cached chat (direct + groups) involving the given " +
+			"contact JID, ordered most-recent-first, so the latest thread surfaces at the top. If you " +
+			"only have one of a contact's identities, call this with it; pass the other JID in a " +
+			"follow-up call to cover the remaining identity. " +
+			"Keywords: conversation, thread, full history, all chats, latest message, did they reply.",
 		InputSchema:  getContactChatsInputSchema,
 		OutputSchema: getContactChatsOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
