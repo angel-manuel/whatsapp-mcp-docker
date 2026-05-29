@@ -37,6 +37,28 @@ func (c ContactRow) Phone() string {
 	return c.JID
 }
 
+// DisplayName returns the best human-readable label for the contact using
+// the Python reference cascade: nickname > full_name > push_name >
+// first_name > business_name > phone number. It never returns empty —
+// callers that need to distinguish "real name known" from "JID fallback"
+// should compare against Phone() / check the underlying fields.
+func (c ContactRow) DisplayName() string {
+	switch {
+	case c.Nickname != "":
+		return c.Nickname
+	case c.FullName != "":
+		return c.FullName
+	case c.PushName != "":
+		return c.PushName
+	case c.FirstName != "":
+		return c.FirstName
+	case c.BusinessName != "":
+		return c.BusinessName
+	default:
+		return c.Phone()
+	}
+}
+
 // contactsSelect is the shared SELECT over contacts + nicknames used by
 // every read path. Ordering prefers the richest display field available so
 // "list all" and "search" present a stable, human-friendly sort.

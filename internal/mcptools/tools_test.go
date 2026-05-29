@@ -454,6 +454,61 @@ func TestListMessages_MediaMetadataExposed(t *testing.T) {
 	}
 }
 
+func TestListMessages_EnrichedFields(t *testing.T) {
+	t.Parallel()
+	// Seed a contact row for Alice so her sender JID resolves to a display
+	// name; Bob has no contact row, so his sender_name must stay null.
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) {
+		if err := s.UpsertContact(context.Background(), cache.Contact{
+			JID:      jidAlice,
+			FullName: "Alice Anderson",
+		}); err != nil {
+			t.Fatalf("seed contact: %v", err)
+		}
+	})
+
+	// Alice's 1:1 chat: m-alice-2 is from self (outgoing), m-alice-1 from Alice (incoming).
+	out := callTool(t, c, "list_messages", map[string]any{"chat_jid": jidAlice})
+	msgs := out["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("len(messages) = %d, want 2", len(msgs))
+	}
+
+	// Newest-first: m-alice-2 (self) then m-alice-1 (Alice).
+	outgoing := msgs[0].(map[string]any)
+	if outgoing["id"] != "m-alice-2" {
+		t.Fatalf("messages[0].id = %v, want m-alice-2", outgoing["id"])
+	}
+	if outgoing["direction"] != "outgoing" {
+		t.Errorf("direction = %v, want outgoing (is_from_me message)", outgoing["direction"])
+	}
+	if outgoing["delivery_status"] != "unknown" {
+		t.Errorf("delivery_status = %v, want unknown (no receipt data cached)", outgoing["delivery_status"])
+	}
+
+	incoming := msgs[1].(map[string]any)
+	if incoming["id"] != "m-alice-1" {
+		t.Fatalf("messages[1].id = %v, want m-alice-1", incoming["id"])
+	}
+	if incoming["direction"] != "incoming" {
+		t.Errorf("direction = %v, want incoming", incoming["direction"])
+	}
+	if incoming["sender_name"] != "Alice Anderson" {
+		t.Errorf("sender_name = %v, want Alice Anderson", incoming["sender_name"])
+	}
+
+	// Bob has no contact row → sender_name is null.
+	bobOut := callTool(t, c, "list_messages", map[string]any{"chat_jid": jidBob})
+	bobMsgs := bobOut["messages"].([]any)
+	if len(bobMsgs) != 1 {
+		t.Fatalf("len(bob messages) = %d, want 1", len(bobMsgs))
+	}
+	bob := bobMsgs[0].(map[string]any)
+	if v, ok := bob["sender_name"]; !ok || v != nil {
+		t.Errorf("sender_name = %v (present=%v), want null", v, ok)
+	}
+}
+
 func TestListMessages_AfterBeforeFilterByTimestamp(t *testing.T) {
 	t.Parallel()
 	c := newServerAndClient(t)

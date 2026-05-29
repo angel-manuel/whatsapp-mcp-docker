@@ -241,22 +241,10 @@ func toContactViews(rows []cache.ContactRow) []ContactView {
 }
 
 // displayName mirrors the Python reference cascade: nickname > full_name
-// > push_name > first_name > business_name > phone number.
+// > push_name > first_name > business_name > phone number. It delegates to
+// cache.ContactRow.DisplayName so the cascade lives in one place.
 func displayName(r cache.ContactRow) string {
-	switch {
-	case r.Nickname != "":
-		return r.Nickname
-	case r.FullName != "":
-		return r.FullName
-	case r.PushName != "":
-		return r.PushName
-	case r.FirstName != "":
-		return r.FirstName
-	case r.BusinessName != "":
-		return r.BusinessName
-	default:
-		return r.Phone()
-	}
+	return r.DisplayName()
 }
 
 // decodeArgs is a small wrapper around json.Unmarshal that tolerates an
