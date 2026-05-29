@@ -38,7 +38,7 @@ type MessageDTO struct {
 	ChatJID        string `json:"chat_jid"`
 	ChatName       any    `json:"chat_name"` // string | null
 	Sender         string `json:"sender"`
-	SenderName     any    `json:"sender_name"`     // string | null — sender JID resolved to contact display name
+	SenderName     any    `json:"sender_name"` // string | null — sender JID resolved to contact display name
 	Content        string `json:"content"`
 	Timestamp      any    `json:"timestamp"` // ISO-8601 string | null
 	IsFromMe       bool   `json:"is_from_me"`
