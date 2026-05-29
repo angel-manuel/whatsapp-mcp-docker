@@ -58,6 +58,9 @@ type listChatsOutput struct {
 //	matches the chat's stored title only. 1:1 chats usually have no title, so
 //	searching a person's name here WILL MISS their direct chat — use
 //	search_contacts → get_contact_chats instead. query is for named groups.
+//
+// Intended tool description addendum (freshness contract, verbatim):
+// "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerListChats(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "list_chats",
@@ -65,7 +68,10 @@ func registerListChats(reg *mcp.Registry, store *cache.Store) error {
 			"pagination, and optional inclusion of each chat's last message preview. " +
 			"NOTE: query matches the chat's stored title only. 1:1 chats usually have " +
 			"no title, so searching a person's name here WILL MISS their direct chat — " +
-			"use search_contacts → get_contact_chats instead. query is for named groups.",
+			"use search_contacts → get_contact_chats instead. query is for named groups. " +
+			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
+			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
+			"poll cache_sync_status until finished → read.",
 		InputSchema:  listChatsInputSchema,
 		OutputSchema: listChatsOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {

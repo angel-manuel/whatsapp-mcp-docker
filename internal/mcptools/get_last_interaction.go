@@ -27,11 +27,16 @@ type getLastInteractionInput struct {
 	ContactJID string `json:"contact_jid"`
 }
 
+// Intended tool description addendum (freshness contract, verbatim):
+// "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerGetLastInteraction(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "get_last_interaction",
 		Description: "Return the most recent cached message exchanged with the contact — " +
-			"either in the 1:1 chat keyed on their JID or any group where they were the sender.",
+			"either in the 1:1 chat keyed on their JID or any group where they were the sender. " +
+			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
+			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
+			"poll cache_sync_status until finished → read.",
 		InputSchema:  getLastInteractionInputSchema,
 		OutputSchema: getLastInteractionOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {

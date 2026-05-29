@@ -50,11 +50,16 @@ type getMessageContextOutput struct {
 	After   []MessageDTO `json:"after"`
 }
 
+// Intended tool description addendum (freshness contract, verbatim):
+// "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerGetMessageContext(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "get_message_context",
 		Description: "Fetch the N messages immediately before and after a target message, " +
-			"scoped to the same chat_jid as the target.",
+			"scoped to the same chat_jid as the target. " +
+			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
+			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
+			"poll cache_sync_status until finished → read.",
 		InputSchema:  getMessageContextInputSchema,
 		OutputSchema: getMessageContextOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {

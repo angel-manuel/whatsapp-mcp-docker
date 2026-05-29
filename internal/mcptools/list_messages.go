@@ -53,11 +53,16 @@ type listMessagesOutput struct {
 	Messages []MessageDTO `json:"messages"`
 }
 
+// Intended tool description addendum (freshness contract, verbatim):
+// "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerListMessages(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "list_messages",
 		Description: "List cached WhatsApp messages, newest first. Supports filtering by chat, " +
-			"sender, full-text body search (FTS5 when `query` is set), and timestamp range.",
+			"sender, full-text body search (FTS5 when `query` is set), and timestamp range. " +
+			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
+			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
+			"poll cache_sync_status until finished → read.",
 		InputSchema:  listMessagesInputSchema,
 		OutputSchema: listMessagesOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {

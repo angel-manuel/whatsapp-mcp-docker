@@ -39,6 +39,9 @@ type getDirectChatByContactInput struct {
 // phone-JID chat only and can return an empty/stale thread even when an
 // active conversation exists under the LID. To see everything, call
 // get_contact_chats first.
+//
+// Intended tool description addendum (freshness contract, verbatim):
+// "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerGetDirectChatByContact(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "get_direct_chat_by_contact",
@@ -46,7 +49,10 @@ func registerGetDirectChatByContact(reg *mcp.Registry, store *cache.Store) error
 			"separate chats under their phone JID (…@s.whatsapp.net) and their privacy " +
 			"LID (…@lid), and messages may split across both. This resolves to the " +
 			"phone-JID chat only and can return an empty/stale thread even when an active " +
-			"conversation exists under the LID. To see everything, call get_contact_chats first.",
+			"conversation exists under the LID. To see everything, call get_contact_chats first. " +
+			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
+			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
+			"poll cache_sync_status until finished → read.",
 		InputSchema:  getDirectChatByContactInputSchema,
 		OutputSchema: getDirectChatByContactOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {

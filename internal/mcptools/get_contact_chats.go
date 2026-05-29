@@ -53,6 +53,9 @@ type getContactChatsInput struct {
 // of a contact's identities, call this with it; pass the other JID in a follow-up
 // call to cover the remaining identity. Keywords: conversation, thread, full
 // history, all chats, latest message, did they reply.
+//
+// Intended tool description addendum (freshness contract, verbatim):
+// "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerGetContactChats(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "get_contact_chats",
@@ -66,7 +69,10 @@ func registerGetContactChats(reg *mcp.Registry, store *cache.Store) error {
 			"contact JID, ordered most-recent-first, so the latest thread surfaces at the top. If you " +
 			"only have one of a contact's identities, call this with it; pass the other JID in a " +
 			"follow-up call to cover the remaining identity. " +
-			"Keywords: conversation, thread, full history, all chats, latest message, did they reply.",
+			"Keywords: conversation, thread, full history, all chats, latest message, did they reply. " +
+			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
+			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
+			"poll cache_sync_status until finished → read.",
 		InputSchema:  getContactChatsInputSchema,
 		OutputSchema: getContactChatsOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {

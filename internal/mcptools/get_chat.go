@@ -29,10 +29,15 @@ type getChatInput struct {
 	IncludeLastMessage *bool  `json:"include_last_message"`
 }
 
+// Intended tool description addendum (freshness contract, verbatim):
+// "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerGetChat(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
-		Name:         "get_chat",
-		Description:  "Fetch cached metadata for a single WhatsApp chat by JID, optionally including the last message preview.",
+		Name: "get_chat",
+		Description: "Fetch cached metadata for a single WhatsApp chat by JID, optionally including the last message preview. " +
+			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
+			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
+			"poll cache_sync_status until finished → read.",
 		InputSchema:  getChatInputSchema,
 		OutputSchema: getChatOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
