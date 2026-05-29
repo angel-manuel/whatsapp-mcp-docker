@@ -31,11 +31,22 @@ type getDirectChatByContactInput struct {
 	ContactJID string `json:"contact_jid"`
 }
 
+// Intended tool description (verbatim):
+//
+// Resolve {contact_jid} to the 1:1 chat. NOTE: a contact can have separate
+// chats under their phone JID (…@s.whatsapp.net) and their privacy LID
+// (…@lid), and messages may split across both. This resolves to the
+// phone-JID chat only and can return an empty/stale thread even when an
+// active conversation exists under the LID. To see everything, call
+// get_contact_chats first.
 func registerGetDirectChatByContact(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "get_direct_chat_by_contact",
-		Description: "Resolve a contact identifier (full JID or bare phone number) to the " +
-			"1:1 chat metadata. Returns not_found when no direct chat exists.",
+		Description: "Resolve {contact_jid} to the 1:1 chat. NOTE: a contact can have " +
+			"separate chats under their phone JID (…@s.whatsapp.net) and their privacy " +
+			"LID (…@lid), and messages may split across both. This resolves to the " +
+			"phone-JID chat only and can return an empty/stale thread even when an active " +
+			"conversation exists under the LID. To see everything, call get_contact_chats first.",
 		InputSchema:  getDirectChatByContactInputSchema,
 		OutputSchema: getDirectChatByContactOutputSchema,
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
