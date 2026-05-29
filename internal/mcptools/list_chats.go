@@ -17,11 +17,11 @@ const listChatsDefaultLimit = 20
 var listChatsInputSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "query":                {"type": ["string","null"], "description": "Case-insensitive substring match on the chat's stored title (or JID). 1:1 chats usually have no title, so searching a person's name here WILL MISS their direct chat — use search_contacts then get_contact_chats instead. query is for named groups."},
+    "query":                {"type": ["string","null"], "description": "The search argument (named 'query', NOT 'search'). Case-insensitive substring match on the chat's stored title (or JID). 1:1 chats usually have no title, so searching a person's name here WILL MISS their direct chat — use search_contacts then get_contact_chats instead. query is for named groups."},
     "limit":                {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
-    "page":                 {"type": "integer", "minimum": 0, "default": 0},
+    "page":                 {"type": "integer", "minimum": 0, "default": 0, "description": "0-based page index."},
     "include_last_message": {"type": "boolean", "default": true},
-    "sort_by":              {"type": "string", "enum": ["last_active","name"], "default": "last_active"},
+    "sort_by":              {"type": "string", "enum": ["last_active","name"], "default": "last_active", "description": "Result ordering. Default 'last_active' => most-recently-active-first (last_message_ts DESC); 'name' => A-Z by title (untitled chats last)."},
     "chat_type":            {"type": ["string","null"], "enum": ["direct","group","newsletter","community",null], "description": "Filter to a single chat type."}
   },
   "additionalProperties": false
@@ -51,6 +51,16 @@ type listChatsOutput struct {
 	Chats []ChatDTO `json:"chats"`
 }
 
+// Argument contract (normalized across the list_* family):
+//   - Search arg is `query` (case-insensitive substring over chat title/JID).
+//     There is NO `search` arg.
+//   - Pagination is `limit` (1–200, default 20) + `page` (0-based).
+//   - Sorting is `sort_by` ∈ {`last_active`,`name`}, default `last_active`.
+//     `last_active` ⇒ most-recently-active-first; `name` ⇒ A→Z (untitled last).
+//     This is the only list_* tool with a sort knob.
+//   - `chat_type` filters to one type; `include_last_message` toggles the
+//     last-message preview (default true).
+//
 // Intended tool description:
 //
 //	List WhatsApp chats cached locally. Supports substring search, pagination,
@@ -58,6 +68,7 @@ type listChatsOutput struct {
 //	matches the chat's stored title only. 1:1 chats usually have no title, so
 //	searching a person's name here WILL MISS their direct chat — use
 //	search_contacts → get_contact_chats instead. query is for named groups.
+//	Ordered most-recently-active-first unless sort_by=name.
 //
 // Intended tool description addendum (freshness contract, verbatim):
 // "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
@@ -69,6 +80,8 @@ func registerListChats(reg *mcp.Registry, store *cache.Store) error {
 			"NOTE: query matches the chat's stored title only. 1:1 chats usually have " +
 			"no title, so searching a person's name here WILL MISS their direct chat — " +
 			"use search_contacts → get_contact_chats instead. query is for named groups. " +
+			"The search arg is `query` (not `search`). Ordered most-recently-active-first " +
+			"unless sort_by=name (A→Z by title). " +
 			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
 			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
 			"poll cache_sync_status until finished → read.",

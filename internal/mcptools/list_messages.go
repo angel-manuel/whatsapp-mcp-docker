@@ -17,13 +17,13 @@ const listMessagesDefaultLimit = 20
 var listMessagesInputSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "chat_jid":   {"type": ["string","null"]},
-    "sender_jid": {"type": ["string","null"]},
-    "query":      {"type": ["string","null"], "description": "Full-text search across message bodies (FTS5 when set; LIKE fallback handled server-side)."},
-    "after":      {"type": ["string","null"], "description": "ISO-8601 timestamp; only messages strictly after this are returned."},
-    "before":     {"type": ["string","null"], "description": "ISO-8601 timestamp; only messages strictly before this are returned."},
+    "chat_jid":   {"type": ["string","null"], "description": "Restrict to one chat key (a chat's JID). Distinct from contact_jid/sender_jid."},
+    "sender_jid": {"type": ["string","null"], "description": "Restrict to messages authored by this JID."},
+    "query":      {"type": ["string","null"], "description": "The search argument (named 'query', NOT 'search'). Full-text search across message bodies (FTS5 when set; LIKE fallback handled server-side)."},
+    "after":      {"type": ["string","null"], "description": "ISO-8601 timestamp (a date/time string, NOT a count); only messages strictly after this are returned."},
+    "before":     {"type": ["string","null"], "description": "ISO-8601 timestamp (a date/time string, NOT a count); only messages strictly before this are returned."},
     "limit":      {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
-    "page":       {"type": "integer", "minimum": 0, "default": 0}
+    "page":       {"type": "integer", "minimum": 0, "default": 0, "description": "0-based page index. Results are always ordered newest-first; there is NO sort parameter — page through time with before/after."}
   },
   "additionalProperties": false
 }`)
@@ -53,6 +53,15 @@ type listMessagesOutput struct {
 	Messages []MessageDTO `json:"messages"`
 }
 
+// Argument contract (normalized across the list_* family):
+//   - Search arg is `query` (FTS5 over message bodies). There is NO `search` arg.
+//   - Pagination is `limit` (1–200, default 20) + `page` (0-based).
+//   - Time range is `before`/`after` as ISO-8601 timestamps (NOT counts —
+//     contrast get_message_context, where before/after are integer windows).
+//   - Filters: `chat_jid` (a chat key), `sender_jid` (author).
+//   - Ordering is fixed newest-first (ts DESC, id ASC). There is NO sort
+//     parameter; page backwards through time with before/after.
+//
 // Intended tool description (verbatim):
 //
 //	List cached WhatsApp messages. Supports filtering by chat, sender,
@@ -61,8 +70,8 @@ type listMessagesOutput struct {
 //	With multi-device or business accounts the same person can send from
 //	multiple JIDs, and an operator controlling both ends sees their own JID
 //	on both sides. Don't infer who said what from message content — trust
-//	sender JID + is_from_me. Ordered newest-first; use before/after for
-//	ranges.
+//	sender JID + is_from_me. Always ordered newest-first; there is no sort
+//	parameter — use before/after for ranges. The search arg is `query`.
 //
 // Intended tool description addendum (freshness contract, verbatim):
 // "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
@@ -75,7 +84,8 @@ func registerListMessages(reg *mcp.Registry, store *cache.Store) error {
 			"With multi-device or business accounts the same person can send from multiple JIDs, " +
 			"and an operator controlling both ends sees their own JID on both sides. " +
 			"Don't infer who said what from message content — trust sender JID + is_from_me. " +
-			"Ordered newest-first; use before/after for ranges. " +
+			"Always ordered newest-first; there is no sort parameter — use before/after for ranges. " +
+			"The search arg is `query` (not `search`). " +
 			"Served from local cache, which may lag live WhatsApp. An empty result can mean " +
 			"'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → " +
 			"poll cache_sync_status until finished → read.",

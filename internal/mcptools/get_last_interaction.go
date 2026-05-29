@@ -27,6 +27,11 @@ type getLastInteractionInput struct {
 	ContactJID string `json:"contact_jid"`
 }
 
+// Argument contract:
+//   - `contact_jid` (required) is a person's identity (phone JID or @lid).
+//   - No pagination and no sort parameter: returns the single newest message
+//     (ts DESC) across the contact's 1:1 chat and any group they sent to.
+//
 // Intended tool description (verbatim):
 //
 //	Return the most recent cached message exchanged with the contact —

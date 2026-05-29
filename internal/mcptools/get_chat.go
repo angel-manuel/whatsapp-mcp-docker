@@ -29,6 +29,11 @@ type getChatInput struct {
 	IncludeLastMessage *bool  `json:"include_last_message"`
 }
 
+// Argument contract:
+//   - `chat_jid` (required) is a chat key, distinct from a contact_jid.
+//   - `include_last_message` (default true) toggles the last-message preview.
+//   - Returns a single chat; no pagination or sort.
+//
 // Intended tool description addendum (freshness contract, verbatim):
 // "Served from local cache, which may lag live WhatsApp. An empty result can mean 'not yet synced,' not 'no message.' For a guaranteed-fresh read: cache_sync → poll cache_sync_status until finished → read."
 func registerGetChat(reg *mcp.Registry, store *cache.Store) error {
