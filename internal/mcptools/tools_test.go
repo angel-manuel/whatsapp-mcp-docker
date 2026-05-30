@@ -864,7 +864,7 @@ func TestNotPairedGatesAllCacheTools(t *testing.T) {
 	}
 
 	names := []string{
-		"list_chats", "get_chat", "list_messages", "get_message_context",
+		"list_chats", "list_conversations", "get_chat", "list_messages", "get_message_context",
 		"get_direct_chat_by_contact", "get_contact_chats", "get_last_interaction",
 		"get_conversation",
 	}
@@ -892,5 +892,183 @@ func TestNotPairedGatesAllCacheTools(t *testing.T) {
 				t.Errorf("%s: code = %v, want %s", name, m["code"], mcp.ErrNotPaired)
 			}
 		})
+	}
+}
+
+// conversationsByJID indexes a list_conversations result by its representative
+// jid for convenient lookup, and fails if the same jid appears twice (a merge
+// regression would surface a contact under both identities).
+func conversationsByJID(t *testing.T, out map[string]any) map[string]map[string]any {
+	t.Helper()
+	raw, ok := out["conversations"].([]any)
+	if !ok {
+		t.Fatalf("conversations not an array: %T", out["conversations"])
+	}
+	byJID := map[string]map[string]any{}
+	for _, c := range raw {
+		cm := c.(map[string]any)
+		jid := cm["jid"].(string)
+		if _, dup := byJID[jid]; dup {
+			t.Fatalf("conversation jid %s appears twice — merge regression", jid)
+		}
+		byJID[jid] = cm
+	}
+	return byJID
+}
+
+func jidSet(t *testing.T, conv map[string]any) map[string]bool {
+	t.Helper()
+	raw, ok := conv["jids"].([]any)
+	if !ok {
+		t.Fatalf("jids not an array: %T", conv["jids"])
+	}
+	set := map[string]bool{}
+	for _, j := range raw {
+		set[j.(string)] = true
+	}
+	return set
+}
+
+func TestListConversations_MergesLinkedIdentities(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedCrossJIDContact(t, s) })
+
+	out := callTool(t, c, "list_conversations", map[string]any{})
+	byJID := conversationsByJID(t, out)
+
+	// Carol surfaces ONCE, keyed on her phone JID, with both identities in jids.
+	carol, ok := byJID[jidCarolPN]
+	if !ok {
+		t.Fatalf("Carol not found under phone JID %s; conversations=%v", jidCarolPN, out["conversations"])
+	}
+	if _, dup := byJID[jidCarolLID]; dup {
+		t.Fatalf("Carol's LID %s leaked as a separate conversation", jidCarolLID)
+	}
+	ids := jidSet(t, carol)
+	if !ids[jidCarolPN] || !ids[jidCarolLID] {
+		t.Errorf("Carol jids = %v, want both %s and %s", carol["jids"], jidCarolPN, jidCarolLID)
+	}
+	// Preview is the newest message across BOTH threads (the LID thread, 10:20).
+	if carol["last_message"] != "got it (lid)" {
+		t.Errorf("Carol last_message = %v, want 'got it (lid)'", carol["last_message"])
+	}
+
+	// The un-aliased fixtures pass through as their own single-identity rows.
+	for _, jid := range []string{jidAlice, jidBob, jidGroup} {
+		conv, ok := byJID[jid]
+		if !ok {
+			t.Fatalf("%s missing from conversations", jid)
+		}
+		if ids := jidSet(t, conv); len(ids) != 1 || !ids[jid] {
+			t.Errorf("%s jids = %v, want [%s]", jid, conv["jids"], jid)
+		}
+	}
+}
+
+func TestListConversations_SumsUnreadAcrossIdentities(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) {
+		seedCrossJIDContact(t, s)
+		ctx := context.Background()
+		// Re-upsert both of Carol's chats with unread counts (same timestamps so
+		// the merge ordering is unchanged); the merged row should sum them.
+		if err := s.UpsertChat(ctx, cache.Chat{JID: jidCarolPN, Name: "Carol", LastMessageTS: tsCarolPN2, UnreadCount: 2}); err != nil {
+			t.Fatalf("unread pn: %v", err)
+		}
+		if err := s.UpsertChat(ctx, cache.Chat{JID: jidCarolLID, Name: "Carol", LastMessageTS: tsCarolLID2, UnreadCount: 3}); err != nil {
+			t.Fatalf("unread lid: %v", err)
+		}
+	})
+
+	out := callTool(t, c, "list_conversations", map[string]any{})
+	carol := conversationsByJID(t, out)[jidCarolPN]
+	if carol == nil {
+		t.Fatalf("Carol not found; conversations=%v", out["conversations"])
+	}
+	// JSON numbers decode as float64.
+	if got := carol["unread_count"].(float64); got != 5 {
+		t.Errorf("Carol unread_count = %v, want 5 (2+3 merged)", got)
+	}
+}
+
+func TestListConversations_PaginationCountsMergedRowAsOne(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedCrossJIDContact(t, s) })
+
+	// Carol's last activity (Jun 2) is the most recent, so limit=1 returns her
+	// single merged row — proving the merge happens before the page slice (a
+	// pre-merge LIMIT 1 would return one half of the split instead).
+	out := callTool(t, c, "list_conversations", map[string]any{"limit": 1, "page": 0})
+	conv := out["conversations"].([]any)
+	if len(conv) != 1 {
+		t.Fatalf("len(conversations) = %d, want 1", len(conv))
+	}
+	first := conv[0].(map[string]any)
+	if first["jid"] != jidCarolPN {
+		t.Errorf("page0 jid = %v, want %s", first["jid"], jidCarolPN)
+	}
+	if ids := jidSet(t, first); !ids[jidCarolPN] || !ids[jidCarolLID] {
+		t.Errorf("page0 jids = %v, want both Carol identities", first["jids"])
+	}
+}
+
+func TestListConversations_SortByName(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedCrossJIDContact(t, s) })
+
+	out := callTool(t, c, "list_conversations", map[string]any{"sort_by": "name"})
+	conv := out["conversations"].([]any)
+	var names []string
+	for _, x := range conv {
+		if n, ok := x.(map[string]any)["name"].(string); ok {
+			names = append(names, n)
+		}
+	}
+	want := []string{"Alice", "Bob", "Carol", "Friends"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("name order = %v, want %v", names, want)
+	}
+}
+
+func TestListConversations_QueryMatchesNameAndMergedJID(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedCrossJIDContact(t, s) })
+
+	// Match by name.
+	byName := conversationsByJID(t, callTool(t, c, "list_conversations", map[string]any{"query": "carol"}))
+	if len(byName) != 1 || byName[jidCarolPN] == nil {
+		t.Errorf("query 'carol' = %v, want only merged Carol row", byName)
+	}
+
+	// Match by a substring of the *LID* identity — proving the filter sees the
+	// full merged identity set, not just the representative phone JID.
+	byLID := conversationsByJID(t, callTool(t, c, "list_conversations", map[string]any{"query": "888777"}))
+	if len(byLID) != 1 || byLID[jidCarolPN] == nil {
+		t.Errorf("query '888777' = %v, want merged Carol row matched via LID", byLID)
+	}
+}
+
+func TestListConversations_FilterByChatType(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedCrossJIDContact(t, s) })
+
+	byJID := conversationsByJID(t, callTool(t, c, "list_conversations", map[string]any{"chat_type": "direct"}))
+	if _, ok := byJID[jidGroup]; ok {
+		t.Errorf("chat_type=direct returned the group %s", jidGroup)
+	}
+	for _, jid := range []string{jidAlice, jidBob, jidCarolPN} {
+		if _, ok := byJID[jid]; !ok {
+			t.Errorf("chat_type=direct missing %s", jid)
+		}
+	}
+}
+
+func TestListConversations_RejectsInvalidSortBy(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClient(t)
+
+	err := callToolError(t, c, "list_conversations", map[string]any{"sort_by": "bogus"})
+	if err["code"] != string(mcp.ErrInvalidArgument) {
+		t.Errorf("code = %v, want %s", err["code"], mcp.ErrInvalidArgument)
 	}
 }

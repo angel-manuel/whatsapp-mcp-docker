@@ -10,7 +10,7 @@ MCP transport, pairing, session persistence — runs in **one Go process**
 inside **one Docker image**. No sidecars, no compose bundle, no second
 language runtime.
 
-Today the server ships **17 MCP tools**: cache-backed read tools for
+Today the server ships **18 MCP tools**: cache-backed read tools for
 chats and messages, plus `send_message`, contact / group lookups, a
 diagnostic `cache_sync_status`, the `ping` health check, and the native
 `pairing_start` / `pairing_complete` tools that let an agent drive the
@@ -118,11 +118,11 @@ who can read `/proc/<pid>/environ`.
 
 ## Tools
 
-Tools shipping today (17):
+Tools shipping today (18):
 
-- **Cache-backed reads** — `list_chats`, `get_chat`, `list_messages`,
-  `get_message_context`, `get_last_interaction`, `get_contact_chats`,
-  `get_direct_chat_by_contact`, `get_conversation`
+- **Cache-backed reads** — `list_chats`, `list_conversations`, `get_chat`,
+  `list_messages`, `get_message_context`, `get_last_interaction`,
+  `get_contact_chats`, `get_direct_chat_by_contact`, `get_conversation`
 - **Contacts** — `search_contacts`, `list_all_contacts`,
   `get_contact_details`
 - **Groups** — `get_group_info`

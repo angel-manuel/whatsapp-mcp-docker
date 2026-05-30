@@ -17,6 +17,7 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Capability                           | Tool                          |
 | ------------------------------------ | ----------------------------- |
 | Browse cached chats                  | `list_chats`                  |
+| Browse conversations (JIDs merged)   | `list_conversations`          |
 | Single chat lookup                   | `get_chat`                    |
 | List messages in a chat              | `list_messages`               |
 | Surrounding context for a message    | `get_message_context`         |
