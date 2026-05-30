@@ -53,4 +53,7 @@ VOLUME ["/data"]
 
 EXPOSE 8081
 
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["/usr/local/bin/whatsapp-mcp", "--healthcheck"]
+
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/whatsapp-mcp"]
