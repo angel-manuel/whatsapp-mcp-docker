@@ -110,9 +110,10 @@ func handleGetContactChats(ctx context.Context, store *cache.Store, in getContac
 	query := `
 SELECT c.jid, c.name, c.is_group, c.chat_type, c.last_message_ts,
        COALESCE(m.body, ''), COALESCE(m.id, ''), COALESCE(m.sender_jid, ''),
-       COALESCE(m.is_from_me, 0), CASE WHEN m.id IS NULL THEN 0 ELSE 1 END
+       COALESCE(m.is_from_me, 0), CASE WHEN m.id IS NULL THEN 0 ELSE 1 END,
+       ` + chatContactNameColumns + `
 FROM chats c
-LEFT JOIN messages m ON m.chat_jid = c.jid AND m.ts = c.last_message_ts
+LEFT JOIN messages m ON m.chat_jid = c.jid AND m.ts = c.last_message_ts` + chatContactJoins + `
 WHERE c.jid = ?
    OR EXISTS (SELECT 1 FROM messages mm WHERE mm.chat_jid = c.jid AND mm.sender_jid = ?)
 ORDER BY c.last_message_ts DESC, c.jid ASC
@@ -132,10 +133,13 @@ LIMIT ? OFFSET ?`
 			isGroup, isFromMe                    int
 			ts                                   int64
 			hasMessage                           int
+			contact                              cache.ContactRow
 		)
-		if err := rows.Scan(&cj, &name, &isGroup, &chatType, &ts, &body, &id, &sender, &isFromMe, &hasMessage); err != nil {
+		if err := rows.Scan(&cj, &name, &isGroup, &chatType, &ts, &body, &id, &sender, &isFromMe, &hasMessage,
+			&contact.PushName, &contact.BusinessName, &contact.FirstName, &contact.FullName, &contact.Nickname); err != nil {
 			return mcp.InternalError(fmt.Sprintf("get_contact_chats scan: %v", err)), nil
 		}
+		name = effectiveChatName(name, chatType, contact)
 		out.Chats = append(out.Chats, buildChatDTO(cj, name, isGroup != 0, chatType, ts, hasMessage == 1, body, id, sender, isFromMe != 0))
 	}
 	if err := rows.Err(); err != nil && !errors.Is(err, sql.ErrNoRows) {

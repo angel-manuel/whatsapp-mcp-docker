@@ -222,3 +222,31 @@ func buildChatDTO(jid, name string, isGroup bool, chatType string, ts int64, inc
 	}
 	return dto
 }
+
+// chatContactJoins joins the contacts + nicknames tables on the chat JID so a
+// chat SELECT can resolve a direct (1:1) chat's contact display name in a
+// single query (no N+1 lookups). It mirrors messageContactJoins but keys on the
+// chat row (`c.jid`) instead of the message sender. For a direct chat the chat
+// JID is the contact's identity; for groups the join simply misses.
+const chatContactJoins = `
+LEFT JOIN contacts ct  ON ct.jid = c.jid
+LEFT JOIN nicknames nk ON nk.jid = c.jid`
+
+// chatContactNameColumns is the trailing column list a chat SELECT appends so a
+// scanned row can be turned into a cache.ContactRow and resolved via
+// resolveSenderName. COALESCE'd to empty for chats with no contact/nickname row.
+const chatContactNameColumns = `COALESCE(ct.push_name,''), COALESCE(ct.business_name,''),
+       COALESCE(ct.first_name,''), COALESCE(ct.full_name,''), COALESCE(nk.nickname,'')`
+
+// effectiveChatName decides the name surfaced for a chat. Groups, newsletters
+// and any chat that already carries a stored title keep that title unchanged.
+// Only an untitled direct (1:1) chat falls back to the contact's display name —
+// WhatsApp never assigns 1:1 chats a title, but the sender's contact info is
+// cached. resolveSenderName returns "" when no real contact field is known, so
+// the result stays "" (→ JSON null) rather than echoing a bare phone number.
+func effectiveChatName(storedName, chatType string, c cache.ContactRow) string {
+	if storedName != "" || chatType != "direct" {
+		return storedName
+	}
+	return resolveSenderName(c)
+}
