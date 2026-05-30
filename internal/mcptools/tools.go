@@ -39,6 +39,7 @@ func Register(reg *mcp.Registry, store *cache.Store) error {
 		registerGetDirectChatByContact,
 		registerGetContactChats,
 		registerGetLastInteraction,
+		registerGetConversation,
 	}
 	for _, fn := range registrations {
 		if err := fn(reg, store); err != nil {

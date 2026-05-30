@@ -156,6 +156,11 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 		}
 	}
 
+	// whatsmeow attaches the sender's alternate address (the LID when Sender
+	// is the phone JID, and vice-versa). Record the pairing so the read side
+	// can merge a contact's split phone/LID threads (see get_conversation).
+	i.recordJIDAlias(ctx, evt.Info.Sender, evt.Info.SenderAlt)
+
 	msg := buildMessageRow(chatJID, senderJID, evt.Info.ID, evt.Info.PushName, ts, evt.Info.IsFromMe, evt.Message)
 	if msg == nil {
 		return
@@ -163,6 +168,30 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 	if err := i.store.InsertMessage(ctx, *msg); err != nil {
 		i.logger.Warn("cache: insert message",
 			slog.String("chat_jid", chatJID), slog.String("message_id", evt.Info.ID), slog.String("err", err.Error()))
+	}
+}
+
+// recordJIDAlias persists the link between a contact's phone-number JID and
+// privacy LID when a message carries both addresses. a and b are the sender's
+// primary and alternate identities (in either order); the pair is stored only
+// when exactly one is a phone JID and the other a LID. Anything else (same
+// server, group, empty, broadcast) is ignored.
+func (i *Ingestor) recordJIDAlias(ctx context.Context, a, b types.JID) {
+	if a.IsEmpty() || b.IsEmpty() {
+		return
+	}
+	var lid, pn types.JID
+	switch {
+	case a.Server == types.HiddenUserServer && b.Server == types.DefaultUserServer:
+		lid, pn = a, b
+	case a.Server == types.DefaultUserServer && b.Server == types.HiddenUserServer:
+		lid, pn = b, a
+	default:
+		return
+	}
+	if err := i.store.UpsertJIDAlias(ctx, lid.ToNonAD().String(), pn.ToNonAD().String()); err != nil {
+		i.logger.Warn("cache: record jid alias",
+			slog.String("lid", lid.String()), slog.String("pn", pn.String()), slog.String("err", err.Error()))
 	}
 }
 

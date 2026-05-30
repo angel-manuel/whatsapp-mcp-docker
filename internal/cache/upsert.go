@@ -136,6 +136,27 @@ ON CONFLICT(jid) DO UPDATE SET
 	return nil
 }
 
+// UpsertJIDAlias records that a phone-number JID (…@s.whatsapp.net) and a
+// privacy LID (…@lid) belong to the same contact, so the read side can merge
+// the two threads (see get_conversation). It is a no-op when either side is
+// empty. Re-recording the same pair only bumps updated_at — the link itself
+// is immutable.
+func (s *Store) UpsertJIDAlias(ctx context.Context, lidJID, pnJID string) error {
+	if lidJID == "" || pnJID == "" {
+		return nil
+	}
+	now := time.Now().Unix()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO jid_aliases (lid_jid, pn_jid, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(lid_jid, pn_jid) DO UPDATE SET updated_at = excluded.updated_at
+`, lidJID, pnJID, now)
+	if err != nil {
+		return fmt.Errorf("cache: upsert jid alias %s<->%s: %w", lidJID, pnJID, err)
+	}
+	return nil
+}
+
 // UpsertNickname inserts or updates a local nickname by JID.
 func (s *Store) UpsertNickname(ctx context.Context, n Nickname) error {
 	if n.JID == "" {

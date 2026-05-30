@@ -23,6 +23,7 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Most recent interaction with someone | `get_last_interaction`        |
 | Chats involving a contact            | `get_contact_chats`           |
 | Direct chat by contact JID/number    | `get_direct_chat_by_contact`  |
+| Full conversation merged across a contact's phone JID + LID | `get_conversation` |
 
 ### whatsmeow-backed tools (`internal/tools`)
 
