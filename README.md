@@ -104,7 +104,7 @@ Most operators only touch these:
 | `PORT` | `8081` | MCP transport port. |
 | `ADMIN_PORT` | `8082` | Admin HTTP port (pair, health, status, SSE events). |
 | `DATA_DIR` | `/data` | The only writable volume; holds `session.db` (whatsmeow identity) and `cache.db` (chat/message cache). |
-| `AUTH_TOKEN` | *(unset)* | Bearer token for MCP HTTP + every admin route except `/admin/health`. |
+| `AUTH_TOKEN` | *(unset)* | Bearer token guarding the MCP HTTP endpoint (`/mcp`). The `/healthz` liveness probe is exempt. |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | If all three are set, client mTLS replaces `AUTH_TOKEN`. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error`. |
@@ -166,9 +166,9 @@ Full pairing contract — events, error codes — is in
   re-pairing.
 - **Read-only root filesystem compatible** — mount `/` as `ro`,
   `/data` and `/tmp` as `rw`.
-- **Healthcheck is built-in** — `whatsapp-mcp --healthcheck` probes
-  `http://127.0.0.1:$ADMIN_PORT/admin/health`. No shell or curl needed
-  in the distroless image.
+- **Healthcheck is built-in** — `whatsapp-mcp --healthcheck` probes the
+  unauthenticated `http://127.0.0.1:$PORT/healthz` liveness endpoint. No shell
+  or curl needed in the distroless image.
 - **Rootless Podman**: the image runs as UID 1000 (non-root). Named volumes
   are initialised with the correct ownership automatically. If you switch to a
   bind mount instead, add `--userns=keep-id` so the host directory is writable

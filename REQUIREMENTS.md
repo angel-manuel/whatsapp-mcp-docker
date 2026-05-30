@@ -174,7 +174,7 @@ No long-lived secrets in env vars in production: operators should deliver `AUTH_
 ## Observability
 
 - Structured JSON logs to stdout; one event per line; includes `connection_id` (if passed via env) and a stable `event_type`.
-- `GET /admin/health` — liveness (process up, SQLite open).
+- `GET /healthz` — unauthenticated liveness probe (HTTP server up and routing); drives the container HEALTHCHECK via `whatsapp-mcp --healthcheck`.
 - `GET /admin/ready` — readiness (connected + logged in).
 - `GET /admin/status` — snapshot: `{ connected, logged_in, jid, pushname, last_event, uptime_s }`.
 - `GET /admin/metrics` — Prometheus exposition (counters for tool calls, message send/recv, reconnect attempts; gauges for connection state; histogram for whatsmeow IQ round-trip).

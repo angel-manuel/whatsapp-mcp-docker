@@ -167,9 +167,30 @@ func (s *Server) HTTPHandler() http.Handler {
 	streamable := mcpserver.NewStreamableHTTPServer(s.buildCore(),
 		mcpserver.WithStateLess(true),
 	)
+	return s.newHTTPMux(streamable)
+}
+
+// newHTTPMux builds the HTTP routing surface shared by Run and HTTPHandler:
+// the bearer-authenticated MCP endpoint at /mcp plus an unauthenticated
+// /healthz liveness probe used by the container HEALTHCHECK.
+func (s *Server) newHTTPMux(streamable http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", bearerAuth(s.cfg.AuthToken, streamable))
+	mux.HandleFunc("/healthz", handleHealthz)
 	return mux
+}
+
+// handleHealthz is an unauthenticated liveness probe reporting that the HTTP
+// server is accepting connections and routing. It exposes no state beyond a
+// 200, so it is safe to leave outside the bearer-auth gate.
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "ok\n")
 }
 
 // ListenStdio runs the stdio transport against caller-supplied pipes.
@@ -201,8 +222,7 @@ func (s *Server) runHTTP(ctx context.Context, core *mcpserver.MCPServer) error {
 		mcpserver.WithStateLess(true),
 	)
 
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", bearerAuth(s.cfg.AuthToken, streamable))
+	mux := s.newHTTPMux(streamable)
 
 	addr := net.JoinHostPort(s.cfg.BindAddr, fmt.Sprintf("%d", s.cfg.Port))
 	httpSrv := &http.Server{

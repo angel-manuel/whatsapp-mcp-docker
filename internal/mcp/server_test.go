@@ -346,6 +346,48 @@ func TestHTTP_MissingBearerRejected(t *testing.T) {
 	}
 }
 
+// TestHTTP_HealthzUnauthenticated verifies /healthz returns 200 without a
+// bearer token, so the container HEALTHCHECK can probe it on distroless
+// images. The endpoint sits outside the bearer-auth gate by design.
+func TestHTTP_HealthzUnauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t, TransportHTTP, AlwaysPaired)
+	ts := httptest.NewServer(srv.HTTPHandler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// TestHTTP_HealthzRejectsNonGet verifies the probe endpoint refuses methods
+// other than GET/HEAD with 405 rather than silently accepting them.
+func TestHTTP_HealthzRejectsNonGet(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t, TransportHTTP, AlwaysPaired)
+	ts := httptest.NewServer(srv.HTTPHandler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/healthz", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
 // TestHTTP_WrongBearerRejected verifies a bearer token that does not
 // match the configured one is rejected with 401.
 func TestHTTP_WrongBearerRejected(t *testing.T) {
