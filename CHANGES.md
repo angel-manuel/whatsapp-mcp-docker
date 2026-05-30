@@ -27,6 +27,25 @@ are strictly additive — clients that don't call them see no change.
   proxy mediate pairing alongside every other tool call without a
   second transport.
 
+### `get_conversation`
+
+- **Reference**: no equivalent. The Python server exposes only per-JID
+  lookups (`get_direct_chat_by_contact`, `get_contact_chats`,
+  `get_last_interaction`), so reconstructing a contact's full thread when
+  WhatsApp has split it across their phone JID (…@s.whatsapp.net) and
+  privacy LID (…@lid) takes several calls plus manual merging.
+- **Go**: a single front-door tool — `get_conversation(contact, limit?,
+  page?, before?, after?)` — resolves the contact to all of its
+  identities (via the `jid_aliases` mapping the ingestor learns from each
+  message's alternate address) and merges every chat into one
+  newest-first, de-duplicated timeline of enriched messages (resolved
+  sender name, explicit direction, delivery status). Subject to the
+  `not_paired` gate like every other cache read.
+- **Why**: strictly additive — the lower-level per-JID tools are
+  unchanged for power use. It only collapses the common
+  "what's the latest with this person?" workflow into one call instead of
+  six, which the multi-identity split otherwise forces.
+
 ## Read-side tools (cache-backed)
 
 ### `list_chats` — list wrapped in object

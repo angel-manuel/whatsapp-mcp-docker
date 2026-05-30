@@ -54,6 +54,8 @@ Design-wise the container is also intended to be safely embeddable behind an ext
 
 Each tool's input schema, output shape, and error semantics MUST match the upstream Python reference unless the Go binding surfaces a strictly better type (e.g. typed JID instead of loose strings). Breaking divergences require a note in `CHANGES.md`.
 
+Beyond the parity surface, the Go build also exposes `get_conversation` — a native, additive read tool with no upstream equivalent. It is the canonical "what's the latest with this person?" front door: it merges every chat for a contact across their phone JID (…@s.whatsapp.net) and privacy LID (…@lid) into one newest-first, de-duplicated timeline of enriched messages. The lower-level per-JID read tools (e.g. `get_direct_chat_by_contact`, `get_contact_chats`) are unchanged and remain available for power use. Like the other cache reads, it is subject to the `not_paired` gate.
+
 In addition to the parity surface, the Go build exposes 2 native tools — `pairing_start`, `pairing_complete` — for agents that drive pairing through the MCP transport. The admin HTTP SSE endpoints (§Pairing) remain the canonical UI-broker path; the two surfaces are mutually exclusive at the wa layer (`adminMu` + `ErrPairInProgress`). These tools, plus `ping`, are exempt from the `not_paired` gate so that a pre-pair agent can bootstrap itself.
 
 ## Architecture

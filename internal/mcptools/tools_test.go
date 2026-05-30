@@ -678,6 +678,140 @@ func TestGetLastInteraction_NotFound(t *testing.T) {
 	}
 }
 
+// seedCrossJIDContact adds a contact ("Carol") whose messages are split
+// across a phone-number JID 1:1 chat and a separate privacy-LID 1:1 chat,
+// linked through jid_aliases. The LID's user component deliberately shares no
+// digits with the phone number, so the merge can only happen via the alias
+// table (not by accidental substring matching).
+const (
+	jidCarolPN  = "333@s.whatsapp.net"
+	jidCarolLID = "888777@lid"
+)
+
+var (
+	tsCarolPN1  = time.Date(2024, 6, 2, 10, 0, 0, 0, time.UTC)
+	tsCarolLID1 = time.Date(2024, 6, 2, 10, 5, 0, 0, time.UTC)
+	tsCarolPN2  = time.Date(2024, 6, 2, 10, 10, 0, 0, time.UTC)
+	tsCarolLID2 = time.Date(2024, 6, 2, 10, 20, 0, 0, time.UTC)
+)
+
+func seedCrossJIDContact(t *testing.T, store *cache.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	for _, c := range []cache.Chat{
+		{JID: jidCarolPN, Name: "Carol", LastMessageTS: tsCarolPN2},
+		{JID: jidCarolLID, Name: "Carol", LastMessageTS: tsCarolLID2},
+	} {
+		if err := store.UpsertChat(ctx, c); err != nil {
+			t.Fatalf("seed cross-jid chat %s: %v", c.JID, err)
+		}
+	}
+	// Resolve Carol's phone JID to a display name; the LID has no contact row.
+	if err := store.UpsertContact(ctx, cache.Contact{JID: jidCarolPN, FullName: "Carol Carter"}); err != nil {
+		t.Fatalf("seed carol contact: %v", err)
+	}
+	if err := store.UpsertJIDAlias(ctx, jidCarolLID, jidCarolPN); err != nil {
+		t.Fatalf("seed carol alias: %v", err)
+	}
+
+	msgs := []cache.Message{
+		{ID: "c-pn-1", ChatJID: jidCarolPN, SenderJID: jidCarolPN, Timestamp: tsCarolPN1, Kind: cache.KindText, Body: "hi from my phone"},
+		{ID: "c-lid-1", ChatJID: jidCarolLID, SenderJID: jidCarolLID, Timestamp: tsCarolLID1, Kind: cache.KindText, Body: "and from my lid"},
+		{ID: "c-pn-2", ChatJID: jidCarolPN, SenderJID: jidSelf, Timestamp: tsCarolPN2, Kind: cache.KindText, Body: "got it (phone)", IsFromMe: true},
+		{ID: "c-lid-2", ChatJID: jidCarolLID, SenderJID: jidSelf, Timestamp: tsCarolLID2, Kind: cache.KindText, Body: "got it (lid)", IsFromMe: true},
+	}
+	for _, m := range msgs {
+		if err := store.InsertMessage(ctx, m); err != nil {
+			t.Fatalf("seed cross-jid message %s: %v", m.ID, err)
+		}
+	}
+}
+
+func TestGetConversation_MergesAcrossPhoneAndLID(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedCrossJIDContact(t, s) })
+
+	// Pass the bare phone number: only the phone JID matches directly; the LID
+	// thread is pulled in solely through the alias link.
+	out := callTool(t, c, "get_conversation", map[string]any{"contact": "333"})
+
+	// jids surfaces both merged identities.
+	rawJIDs, _ := out["jids"].([]any)
+	gotJIDs := map[string]bool{}
+	for _, j := range rawJIDs {
+		gotJIDs[j.(string)] = true
+	}
+	if !gotJIDs[jidCarolPN] || !gotJIDs[jidCarolLID] {
+		t.Fatalf("jids = %v, want both %s and %s", rawJIDs, jidCarolPN, jidCarolLID)
+	}
+
+	msgs := out["messages"].([]any)
+	if len(msgs) != 4 {
+		t.Fatalf("len(messages) = %d, want 4 (both threads merged)", len(msgs))
+	}
+
+	// Strict newest-first interleave across the two chats.
+	wantOrder := []string{"c-lid-2", "c-pn-2", "c-lid-1", "c-pn-1"}
+	seen := map[string]bool{}
+	for i, m := range msgs {
+		mm := m.(map[string]any)
+		id := mm["id"].(string)
+		if id != wantOrder[i] {
+			t.Errorf("messages[%d].id = %s, want %s", i, id, wantOrder[i])
+		}
+		if seen[id] {
+			t.Errorf("duplicate message %s in merged timeline", id)
+		}
+		seen[id] = true
+	}
+
+	// Enriched fields survive the merge.
+	last := msgs[len(msgs)-1].(map[string]any) // c-pn-1, incoming from Carol's phone JID
+	if last["direction"] != "incoming" {
+		t.Errorf("c-pn-1 direction = %v, want incoming", last["direction"])
+	}
+	if last["sender_name"] != "Carol Carter" {
+		t.Errorf("c-pn-1 sender_name = %v, want Carol Carter", last["sender_name"])
+	}
+	first := msgs[0].(map[string]any) // c-lid-2, outgoing
+	if first["direction"] != "outgoing" {
+		t.Errorf("c-lid-2 direction = %v, want outgoing", first["direction"])
+	}
+	if first["delivery_status"] != "unknown" {
+		t.Errorf("c-lid-2 delivery_status = %v, want unknown", first["delivery_status"])
+	}
+}
+
+func TestGetConversation_SingleIdentityNoAlias(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClient(t)
+
+	// Bob has no alias: the conversation is still resolved from his single JID,
+	// covering both his 1:1 thread (m-bob-1) and his line in the group (m-g-2).
+	out := callTool(t, c, "get_conversation", map[string]any{"contact": jidBob})
+	if jids := out["jids"].([]any); len(jids) != 1 || jids[0] != jidBob {
+		t.Fatalf("jids = %v, want [%s]", out["jids"], jidBob)
+	}
+	ids := map[string]bool{}
+	for _, m := range out["messages"].([]any) {
+		ids[m.(map[string]any)["id"].(string)] = true
+	}
+	if !ids["m-bob-1"] || !ids["m-g-2"] {
+		t.Errorf("messages = %v, want both m-bob-1 and m-g-2", ids)
+	}
+}
+
+func TestGetConversation_RejectsEmptyContact(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClient(t)
+
+	err := callToolError(t, c, "get_conversation", map[string]any{"contact": "   "})
+	if err["code"] != string(mcp.ErrInvalidArgument) {
+		t.Errorf("code = %v, want %s", err["code"], mcp.ErrInvalidArgument)
+	}
+}
+
 func TestNotPairedGatesAllCacheTools(t *testing.T) {
 	t.Parallel()
 
@@ -732,6 +866,7 @@ func TestNotPairedGatesAllCacheTools(t *testing.T) {
 	names := []string{
 		"list_chats", "get_chat", "list_messages", "get_message_context",
 		"get_direct_chat_by_contact", "get_contact_chats", "get_last_interaction",
+		"get_conversation",
 	}
 	for _, name := range names {
 		name := name
@@ -742,6 +877,7 @@ func TestNotPairedGatesAllCacheTools(t *testing.T) {
 			req.Params.Arguments = map[string]any{
 				"chat_jid":    "x@s.whatsapp.net",
 				"contact_jid": "x@s.whatsapp.net",
+				"contact":     "x@s.whatsapp.net",
 				"message_id":  "x",
 			}
 			res, err := client.CallTool(startCtx, req)

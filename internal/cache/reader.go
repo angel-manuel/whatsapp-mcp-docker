@@ -185,6 +185,43 @@ func (s *Store) GetChatNameByJID(ctx context.Context, jid string) (string, error
 	return name, nil
 }
 
+// ResolveLinkedJIDs returns jid together with every other identity linked to
+// it through jid_aliases — i.e. a contact's phone-number JID and privacy LID.
+// The input jid is always returned first (and only once); linked identities
+// follow in a stable order. When jid has no recorded alias the result is just
+// [jid], so callers can treat the single-identity case uniformly.
+func (s *Store) ResolveLinkedJIDs(ctx context.Context, jid string) ([]string, error) {
+	if jid == "" {
+		return nil, errors.New("cache: ResolveLinkedJIDs: jid required")
+	}
+	out := []string{jid}
+	seen := map[string]bool{jid: true}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT pn_jid FROM jid_aliases WHERE lid_jid = ?
+UNION
+SELECT lid_jid FROM jid_aliases WHERE pn_jid = ?
+`, jid, jid)
+	if err != nil {
+		return nil, fmt.Errorf("cache: resolve linked jids for %s: %w", jid, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var linked string
+		if err := rows.Scan(&linked); err != nil {
+			return nil, fmt.Errorf("cache: scan linked jid: %w", err)
+		}
+		if linked == "" || seen[linked] {
+			continue
+		}
+		seen[linked] = true
+		out = append(out, linked)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cache: iterate linked jids: %w", err)
+	}
+	return out, nil
+}
+
 func scanContacts(rows *sql.Rows) ([]ContactRow, error) {
 	var out []ContactRow
 	for rows.Next() {
