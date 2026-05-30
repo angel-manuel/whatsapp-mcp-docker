@@ -1072,3 +1072,112 @@ func TestListConversations_RejectsInvalidSortBy(t *testing.T) {
 		t.Errorf("code = %v, want %s", err["code"], mcp.ErrInvalidArgument)
 	}
 }
+
+// Untitled direct chats (chats.name == ”) fall back to the contact's display
+// name so 1:1 conversations aren't surfaced with name=null when contact info is
+// cached. The fallback is scoped to chat_type=='direct'; groups keep null.
+func TestListConversations_UntitledDirectFallsBackToContactName(t *testing.T) {
+	t.Parallel()
+	const (
+		jidDanPN  = "445@s.whatsapp.net" // untitled phone-JID chat, has a contact row
+		jidDanLID = "778899@lid"         // untitled LID chat, NO contact row, newer (winner)
+		jidErin   = "556@s.whatsapp.net" // untitled direct chat, no contact → stays null
+		jidNoName = "667@g.us"           // untitled group, even with a stray contact row → null
+	)
+	tsDanPN := time.Date(2024, 6, 3, 10, 0, 0, 0, time.UTC)
+	tsDanLID := time.Date(2024, 6, 3, 11, 0, 0, 0, time.UTC) // newer → LID row wins
+	tsErin := time.Date(2024, 6, 3, 9, 0, 0, 0, time.UTC)
+	tsGrp := time.Date(2024, 6, 3, 8, 0, 0, 0, time.UTC)
+
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) {
+		ctx := context.Background()
+		chats := []cache.Chat{
+			{JID: jidDanPN, LastMessageTS: tsDanPN},   // name=""
+			{JID: jidDanLID, LastMessageTS: tsDanLID}, // name=""
+			{JID: jidErin, LastMessageTS: tsErin},     // name=""
+			{JID: jidNoName, IsGroup: true, LastMessageTS: tsGrp},
+		}
+		for _, ch := range chats {
+			if err := s.UpsertChat(ctx, ch); err != nil {
+				t.Fatalf("seed chat %s: %v", ch.JID, err)
+			}
+		}
+		// Contact name lives on the phone JID, but the *winner* row is the LID —
+		// proving the merge picks the name up from any member, not just the winner.
+		if err := s.UpsertContact(ctx, cache.Contact{JID: jidDanPN, PushName: "Dan Dawson"}); err != nil {
+			t.Fatalf("seed dan contact: %v", err)
+		}
+		// A stray contact row keyed on the group JID must NOT leak into the title.
+		if err := s.UpsertContact(ctx, cache.Contact{JID: jidNoName, PushName: "ShouldNotShow"}); err != nil {
+			t.Fatalf("seed group contact: %v", err)
+		}
+		if err := s.UpsertJIDAlias(ctx, jidDanLID, jidDanPN); err != nil {
+			t.Fatalf("seed dan alias: %v", err)
+		}
+	})
+
+	byJID := conversationsByJID(t, callTool(t, c, "list_conversations", map[string]any{}))
+
+	dan, ok := byJID[jidDanPN]
+	if !ok {
+		t.Fatalf("Dan not found under phone JID %s", jidDanPN)
+	}
+	if dan["name"] != "Dan Dawson" {
+		t.Errorf("Dan name = %v, want 'Dan Dawson' (resolved from contact on the PN member)", dan["name"])
+	}
+
+	if erin := byJID[jidErin]; erin == nil {
+		t.Fatalf("Erin not found")
+	} else if erin["name"] != nil {
+		t.Errorf("Erin name = %v, want null (untitled direct, no contact)", erin["name"])
+	}
+
+	if grp := byJID[jidNoName]; grp == nil {
+		t.Fatalf("untitled group not found")
+	} else if grp["name"] != nil {
+		t.Errorf("group name = %v, want null (fallback must not apply to groups)", grp["name"])
+	}
+
+	// The fallback name participates in search and sort, fixing the documented
+	// "1:1 chats have no title so search misses them" limitation.
+	found := conversationsByJID(t, callTool(t, c, "list_conversations", map[string]any{"query": "dawson"}))
+	if len(found) != 1 || found[jidDanPN] == nil {
+		t.Errorf("query 'dawson' = %v, want only Dan's merged row", found)
+	}
+}
+
+// get_contact_chats applies the same untitled-direct fallback so the canonical
+// "conversation with this person" entry point labels the chat.
+func TestGetContactChats_UntitledDirectFallsBackToContactName(t *testing.T) {
+	t.Parallel()
+	const (
+		jidGus = "557@s.whatsapp.net" // untitled direct chat with a contact row
+		jidHal = "558@s.whatsapp.net" // untitled direct chat, no contact → null
+	)
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) {
+		ctx := context.Background()
+		for _, ch := range []cache.Chat{
+			{JID: jidGus, LastMessageTS: time.Date(2024, 6, 4, 10, 0, 0, 0, time.UTC)},
+			{JID: jidHal, LastMessageTS: time.Date(2024, 6, 4, 11, 0, 0, 0, time.UTC)},
+		} {
+			if err := s.UpsertChat(ctx, ch); err != nil {
+				t.Fatalf("seed chat %s: %v", ch.JID, err)
+			}
+		}
+		if err := s.UpsertContact(ctx, cache.Contact{JID: jidGus, FullName: "Gus Green"}); err != nil {
+			t.Fatalf("seed gus contact: %v", err)
+		}
+	})
+
+	gus := callTool(t, c, "get_contact_chats", map[string]any{"contact_jid": jidGus})
+	gusChats := gus["chats"].([]any)
+	if len(gusChats) != 1 || gusChats[0].(map[string]any)["name"] != "Gus Green" {
+		t.Errorf("Gus chats = %v, want one chat named 'Gus Green'", gusChats)
+	}
+
+	hal := callTool(t, c, "get_contact_chats", map[string]any{"contact_jid": jidHal})
+	halChats := hal["chats"].([]any)
+	if len(halChats) != 1 || halChats[0].(map[string]any)["name"] != nil {
+		t.Errorf("Hal chats = %v, want one chat with name=null", halChats)
+	}
+}

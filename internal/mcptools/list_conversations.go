@@ -109,6 +109,9 @@ type chatRow struct {
 	id         string
 	sender     string
 	isFromMe   bool
+	// contactName is the chat's resolved contact display name ("" when none),
+	// used to label untitled direct chats whose chats.name is empty.
+	contactName string
 }
 
 // conversationGroup accumulates every chat row that shares a canonical
@@ -119,6 +122,10 @@ type conversationGroup struct {
 	winner    chatRow
 	unread    int
 	members   map[string]bool
+	// contactName is the first non-empty contact display name seen across the
+	// group's members. Contact info may be keyed under either the phone JID or
+	// the @lid, so any member can supply it.
+	contactName string
 }
 
 func handleListConversations(ctx context.Context, store *cache.Store, in listConversationsInput) (any, error) {
@@ -177,6 +184,9 @@ func handleListConversations(ctx context.Context, store *cache.Store, in listCon
 		}
 		g.unread += r.unread
 		g.members[r.jid] = true
+		if g.contactName == "" && r.contactName != "" {
+			g.contactName = r.contactName
+		}
 		// The query orders by last_message_ts DESC, so the first row seen for
 		// a group is its newest; only overwrite the winner if a later row is
 		// strictly newer (defensive — keeps the merge order-independent).
@@ -191,8 +201,14 @@ func handleListConversations(ctx context.Context, store *cache.Store, in listCon
 	conversations := make([]ConversationDTO, 0, len(order))
 	for _, key := range order {
 		g := groups[key]
+		// g.contactName is already the resolved display name; only an untitled
+		// direct chat falls back to it (groups/newsletters keep their title).
+		name := g.winner.name
+		if name == "" && g.winner.chatType == "direct" {
+			name = g.contactName
+		}
 		dto := ConversationDTO{
-			ChatDTO: buildChatDTO(g.canonical, g.winner.name, g.winner.isGroup, g.winner.chatType,
+			ChatDTO: buildChatDTO(g.canonical, name, g.winner.isGroup, g.winner.chatType,
 				g.winner.ts, include && g.winner.hasMessage, g.winner.body, g.winner.id,
 				g.winner.sender, g.winner.isFromMe),
 			JIDs:        mergedIdentities(g, identitiesOf),
@@ -268,18 +284,20 @@ func loadConversationChats(ctx context.Context, store *cache.Store, include bool
 		query = fmt.Sprintf(`
 SELECT c.jid, c.name, c.is_group, c.chat_type, c.last_message_ts, c.unread_count,
        COALESCE(m.body, ''), COALESCE(m.id, ''), COALESCE(m.sender_jid, ''),
-       COALESCE(m.is_from_me, 0), CASE WHEN m.id IS NULL THEN 0 ELSE 1 END
+       COALESCE(m.is_from_me, 0), CASE WHEN m.id IS NULL THEN 0 ELSE 1 END,
+       `+chatContactNameColumns+`
 FROM chats c
 LEFT JOIN messages m
        ON m.chat_jid = c.jid
-      AND m.ts = c.last_message_ts
+      AND m.ts = c.last_message_ts`+chatContactJoins+`
 %s
 ORDER BY c.last_message_ts DESC, c.jid ASC`, where)
 	} else {
 		query = fmt.Sprintf(`
 SELECT c.jid, c.name, c.is_group, c.chat_type, c.last_message_ts, c.unread_count,
-       '', '', '', 0, 0
-FROM chats c
+       '', '', '', 0, 0,
+       `+chatContactNameColumns+`
+FROM chats c`+chatContactJoins+`
 %s
 ORDER BY c.last_message_ts DESC, c.jid ASC`, where)
 	}
@@ -296,14 +314,17 @@ ORDER BY c.last_message_ts DESC, c.jid ASC`, where)
 			r                 chatRow
 			isGroup, isFromMe int
 			hasMessage        int
+			contact           cache.ContactRow
 		)
 		if err := rows.Scan(&r.jid, &r.name, &isGroup, &r.chatType, &r.ts, &r.unread,
-			&r.body, &r.id, &r.sender, &isFromMe, &hasMessage); err != nil {
+			&r.body, &r.id, &r.sender, &isFromMe, &hasMessage,
+			&contact.PushName, &contact.BusinessName, &contact.FirstName, &contact.FullName, &contact.Nickname); err != nil {
 			return nil, err
 		}
 		r.isGroup = isGroup != 0
 		r.isFromMe = isFromMe != 0
 		r.hasMessage = include && hasMessage == 1
+		r.contactName = resolveSenderName(contact)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil && !errors.Is(err, sql.ErrNoRows) {
