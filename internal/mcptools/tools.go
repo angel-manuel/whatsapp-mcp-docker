@@ -33,6 +33,7 @@ func Register(reg *mcp.Registry, store *cache.Store) error {
 	}
 	registrations := []func(*mcp.Registry, *cache.Store) error{
 		registerListChats,
+		registerListConversations,
 		registerGetChat,
 		registerListMessages,
 		registerGetMessageContext,

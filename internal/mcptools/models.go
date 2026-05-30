@@ -16,6 +16,25 @@ type ChatDTO struct {
 	LastIsFromMe    any    `json:"last_is_from_me"`   // bool | null
 }
 
+// ConversationDTO is the list-level analog of get_conversation's per-contact
+// merge: one logical conversation collapsing a contact's linked phone JID and
+// privacy LID direct chats into a single row. It embeds ChatDTO (so every
+// chat field flattens into the same JSON shape list_chats returns) and adds:
+//   - JIDs: all linked identities behind this conversation, phone JID first —
+//     the same merged identity set get_conversation returns as `jids`.
+//   - UnreadCount: unread messages summed across the merged identities, so the
+//     overview answers "what needs my attention" without double-counting a
+//     split contact. Sourced from the cache's chats.unread_count (already
+//     ingested); not surfaced by ChatDTO/list_chats.
+//
+// Non-direct chats (groups, newsletters) have a single JID and pass through as
+// a one-identity conversation: JIDs is just [jid].
+type ConversationDTO struct {
+	ChatDTO
+	JIDs        []string `json:"jids"`         // all linked identities, phone JID first
+	UnreadCount int      `json:"unread_count"` // summed across merged identities
+}
+
 // MessageDTO mirrors the shape of Python's `Message.to_dict()` output.
 // Media metadata is only populated for non-text kinds.
 //
@@ -67,6 +86,24 @@ const chatSchemaFragment = `{
     "last_is_from_me":   {"type": ["boolean","null"]}
   },
   "required": ["jid","is_group","chat_type"]
+}`
+
+const conversationSchemaFragment = `{
+  "type": "object",
+  "properties": {
+    "jid":               {"type": "string", "description": "Representative identity for the conversation (the phone JID when the contact is split across phone JID + @lid)."},
+    "name":              {"type": ["string","null"]},
+    "is_group":          {"type": "boolean"},
+    "chat_type":         {"type": "string", "enum": ["direct","group","newsletter","community"]},
+    "last_message_time": {"type": ["string","null"], "format": "date-time"},
+    "last_message":      {"type": ["string","null"]},
+    "last_message_id":   {"type": ["string","null"]},
+    "last_sender":       {"type": ["string","null"]},
+    "last_is_from_me":   {"type": ["boolean","null"]},
+    "jids":              {"type": "array", "items": {"type": "string"}, "description": "All linked identities merged into this conversation (phone JID first)."},
+    "unread_count":      {"type": "integer", "description": "Unread messages summed across the merged identities."}
+  },
+  "required": ["jid","is_group","chat_type","jids","unread_count"]
 }`
 
 const messageSchemaFragment = `{
