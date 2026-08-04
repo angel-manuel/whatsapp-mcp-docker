@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Transport is the MCP transport mode.
@@ -35,6 +37,28 @@ type Config struct {
 	PairDeviceName string
 	FFmpegPath     string
 	EnablePprof    bool
+
+	// MediaMaxBytes caps the total size of the downloaded-media store at
+	// {DataDir}/media. Zero disables the cap. Enforced by evicting the
+	// least-recently-requested blobs.
+	MediaMaxBytes int64
+	// MediaTTL evicts downloaded media older than this. Zero disables
+	// age-based eviction.
+	MediaTTL time.Duration
+	// MediaSweepInterval is how often retention runs. A sweep also runs at
+	// startup regardless of this value.
+	MediaSweepInterval time.Duration
+}
+
+// DefaultMediaMaxBytes is the out-of-the-box cap on {DataDir}/media: 1 GiB.
+// Media is a re-downloadable cache, not a system of record, so it ships with
+// a bound rather than growing until the volume fills.
+const DefaultMediaMaxBytes int64 = 1 << 30
+
+// MediaDir is the directory holding blobs downloaded by the download_media
+// tool and served by GET /media/{sha256}.
+func (c *Config) MediaDir() string {
+	return filepath.Join(c.DataDir, "media")
 }
 
 // Load reads the process environment into a Config and validates it.
@@ -62,6 +86,15 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.EnablePprof, err = getEnvBool("ENABLE_PPROF", false); err != nil {
+		return nil, err
+	}
+	if cfg.MediaMaxBytes, err = getEnvInt64("MEDIA_MAX_BYTES", DefaultMediaMaxBytes); err != nil {
+		return nil, err
+	}
+	if cfg.MediaTTL, err = getEnvDuration("MEDIA_TTL", 0); err != nil {
+		return nil, err
+	}
+	if cfg.MediaSweepInterval, err = getEnvDuration("MEDIA_SWEEP_INTERVAL", time.Hour); err != nil {
 		return nil, err
 	}
 
@@ -100,6 +133,16 @@ func (c *Config) Validate() error {
 
 	if c.DataDir == "" {
 		return errors.New("DATA_DIR must not be empty")
+	}
+
+	if c.MediaMaxBytes < 0 {
+		return fmt.Errorf("MEDIA_MAX_BYTES must not be negative, got %d", c.MediaMaxBytes)
+	}
+	if c.MediaTTL < 0 {
+		return fmt.Errorf("MEDIA_TTL must not be negative, got %s", c.MediaTTL)
+	}
+	if c.MediaSweepInterval < 0 {
+		return fmt.Errorf("MEDIA_SWEEP_INTERVAL must not be negative, got %s", c.MediaSweepInterval)
 	}
 
 	if c.Transport == TransportHTTP {
@@ -154,6 +197,31 @@ func getEnvInt(key string, def int) (int, error) {
 		return 0, fmt.Errorf("%s: %w", key, err)
 	}
 	return n, nil
+}
+
+func getEnvInt64(key string, def int64) (int64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return n, nil
+}
+
+// getEnvDuration parses a Go duration string ("30m", "168h", "0").
+func getEnvDuration(key string, def time.Duration) (time.Duration, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return d, nil
 }
 
 func getEnvBool(key string, def bool) (bool, error) {

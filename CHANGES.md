@@ -19,9 +19,8 @@ are strictly additive — clients that don't call them see no change.
   the pair flow themselves via two tools — `pairing_start` (opens the
   flow, returns the first QR payload or, with `phone`, a linking code)
   and `pairing_complete` (polls/waits for terminal). Both bypass the
-  `not_paired` gate; the admin HTTP SSE endpoints (`/admin/pair/start`,
-  `/admin/pair/phone`) remain available and operate on the same
-  underlying flow (mutually exclusive via `wa.adminMu`).
+  `not_paired` gate. They are the only pairing path; concurrent flows are
+  serialised at the wa layer (`wa.adminMu` + `ErrPairInProgress`).
 - **Why**: REQUIREMENTS.md mandates programmatic pairing behind an
   external auth/proxy layer; exposing the flow as MCP tools lets that
   proxy mediate pairing alongside every other tool call without a
@@ -45,6 +44,31 @@ are strictly additive — clients that don't call them see no change.
   unchanged for power use. It only collapses the common
   "what's the latest with this person?" workflow into one call instead of
   six, which the multi-identity split otherwise forces.
+
+## Media tools
+
+### `download_media` — descriptor + HTTP byte route, not a local file path
+
+- **Reference**: returns `{ success, message, file_path }`, where
+  `file_path` is a path on the machine running the MCP server. That only
+  works when the server and the client share a filesystem — which is
+  precisely what a containerised deployment does not do.
+- **Go**: returns `{ media_path, mime, size, filename, sha256 }`.
+  `media_path` is `/media/<sha256>`, an HTTP route served on the same
+  port and behind the same bearer token as `/mcp`. The bytes are fetched
+  out-of-band with a plain `GET`; the tool result never contains them,
+  and never base64.
+- **Why**: MCP cannot carry binary payloads usefully, and pushing an
+  attachment through an agent's context window is wasteful even when it
+  is technically possible. Splitting the flow into "tool returns a
+  pointer, HTTP returns the bytes" lets a gateway stream a file straight
+  to the caller without it ever entering the model's context. Storage is
+  content-addressed, so `sha256` doubles as the cache key and the
+  integrity check, and repeat calls cost nothing.
+- **Note**: an attachment cached before the `media_direct_path` column
+  existed (migration `004`) has only an expiring CDN URL, which cannot be
+  backfilled. Those calls fail with `media_unavailable` and a message
+  telling the caller to run `cache_sync` and retry.
 
 ## Read-side tools (cache-backed)
 
@@ -120,6 +144,14 @@ All read-side tools use the structured error contract introduced in
   ISO-8601 timestamps, group JIDs on direct-only tools).
 - `internal` — unexpected SQLite errors the tool couldn't attribute to
   user input.
+
+`download_media` adds two codes of its own:
+
+- `no_media` — the message exists but carries no attachment. Retrying
+  will never help; the caller picked the wrong message.
+- `media_unavailable` — the attachment exists but its bytes could not be
+  fetched (expired locator, CDN failure). Recoverable, usually by
+  re-ingesting the message with `cache_sync`.
 
 The reference raises Python exceptions or returns `None` for the same
 cases; the Go shape is strictly more informative.

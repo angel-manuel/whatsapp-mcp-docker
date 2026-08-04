@@ -516,3 +516,66 @@ type writeCloser struct{ *io.PipeWriter }
 func (writeCloser) Close() error { return nil }
 
 type readCloser struct{ io.ReadCloser }
+
+// TestHTTP_ExtraRoutesShareTheBearerGate pins the property that makes it
+// safe to hang the media byte route off this listener: Config.Routes
+// entries get the same 401 treatment as /mcp, on the same port, from the
+// same AUTH_TOKEN. A route that bypassed the gate would be an
+// unauthenticated data-exfiltration path.
+func TestHTTP_ExtraRoutesShareTheBearerGate(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Transport: TransportHTTP,
+		Name:      "whatsapp-mcp-test",
+		Version:   "test",
+		AuthToken: "testtoken",
+		BindAddr:  "127.0.0.1",
+		Port:      65000,
+		Routes: map[string]http.Handler{
+			"/media/{sha256}": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("digest:" + r.PathValue("sha256")))
+			}),
+			// A nil handler must be skipped rather than panicking the mux.
+			"/nil-route": nil,
+		},
+	}
+	srv, err := New(cfg, newTestLogger(), nil, AlwaysPaired)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.HTTPHandler())
+	defer ts.Close()
+
+	digest := strings.Repeat("ab", 32)
+
+	unauth, err := http.Get(ts.URL + "/media/" + digest)
+	if err != nil {
+		t.Fatalf("Get without bearer: %v", err)
+	}
+	defer unauth.Body.Close()
+	if unauth.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status without bearer = %d, want 401", unauth.StatusCode)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/media/"+digest, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer testtoken")
+	authed, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Get with bearer: %v", err)
+	}
+	defer authed.Body.Close()
+	if authed.StatusCode != http.StatusOK {
+		t.Fatalf("status with bearer = %d, want 200", authed.StatusCode)
+	}
+	body, err := io.ReadAll(authed.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(body) != "digest:"+digest {
+		t.Fatalf("body = %q, want the {sha256} wildcard to reach the handler", body)
+	}
+}

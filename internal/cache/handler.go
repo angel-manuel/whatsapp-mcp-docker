@@ -514,53 +514,58 @@ func extractEnvelope(msg *waE2E.Message) (MessageKind, *Media, string) {
 	}
 	if img := msg.GetImageMessage(); img != nil {
 		return KindImage, &Media{
-			Mime:      img.GetMimetype(),
-			URL:       img.GetURL(),
-			Key:       img.GetMediaKey(),
-			SHA256:    img.GetFileSHA256(),
-			EncSHA256: img.GetFileEncSHA256(),
-			Length:    img.GetFileLength(),
+			Mime:       img.GetMimetype(),
+			URL:        img.GetURL(),
+			DirectPath: img.GetDirectPath(),
+			Key:        img.GetMediaKey(),
+			SHA256:     img.GetFileSHA256(),
+			EncSHA256:  img.GetFileEncSHA256(),
+			Length:     img.GetFileLength(),
 		}, img.GetCaption()
 	}
 	if vid := msg.GetVideoMessage(); vid != nil {
 		return KindVideo, &Media{
-			Mime:      vid.GetMimetype(),
-			URL:       vid.GetURL(),
-			Key:       vid.GetMediaKey(),
-			SHA256:    vid.GetFileSHA256(),
-			EncSHA256: vid.GetFileEncSHA256(),
-			Length:    vid.GetFileLength(),
+			Mime:       vid.GetMimetype(),
+			URL:        vid.GetURL(),
+			DirectPath: vid.GetDirectPath(),
+			Key:        vid.GetMediaKey(),
+			SHA256:     vid.GetFileSHA256(),
+			EncSHA256:  vid.GetFileEncSHA256(),
+			Length:     vid.GetFileLength(),
 		}, vid.GetCaption()
 	}
 	if aud := msg.GetAudioMessage(); aud != nil {
 		return KindAudio, &Media{
-			Mime:      aud.GetMimetype(),
-			URL:       aud.GetURL(),
-			Key:       aud.GetMediaKey(),
-			SHA256:    aud.GetFileSHA256(),
-			EncSHA256: aud.GetFileEncSHA256(),
-			Length:    aud.GetFileLength(),
+			Mime:       aud.GetMimetype(),
+			URL:        aud.GetURL(),
+			DirectPath: aud.GetDirectPath(),
+			Key:        aud.GetMediaKey(),
+			SHA256:     aud.GetFileSHA256(),
+			EncSHA256:  aud.GetFileEncSHA256(),
+			Length:     aud.GetFileLength(),
 		}, ""
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		return KindDocument, &Media{
-			Mime:      doc.GetMimetype(),
-			Filename:  doc.GetFileName(),
-			URL:       doc.GetURL(),
-			Key:       doc.GetMediaKey(),
-			SHA256:    doc.GetFileSHA256(),
-			EncSHA256: doc.GetFileEncSHA256(),
-			Length:    doc.GetFileLength(),
+			Mime:       doc.GetMimetype(),
+			Filename:   doc.GetFileName(),
+			URL:        doc.GetURL(),
+			DirectPath: doc.GetDirectPath(),
+			Key:        doc.GetMediaKey(),
+			SHA256:     doc.GetFileSHA256(),
+			EncSHA256:  doc.GetFileEncSHA256(),
+			Length:     doc.GetFileLength(),
 		}, doc.GetCaption()
 	}
 	if st := msg.GetStickerMessage(); st != nil {
 		return KindSticker, &Media{
-			Mime:      st.GetMimetype(),
-			URL:       st.GetURL(),
-			Key:       st.GetMediaKey(),
-			SHA256:    st.GetFileSHA256(),
-			EncSHA256: st.GetFileEncSHA256(),
-			Length:    st.GetFileLength(),
+			Mime:       st.GetMimetype(),
+			URL:        st.GetURL(),
+			DirectPath: st.GetDirectPath(),
+			Key:        st.GetMediaKey(),
+			SHA256:     st.GetFileSHA256(),
+			EncSHA256:  st.GetFileEncSHA256(),
+			Length:     st.GetFileLength(),
 		}, ""
 	}
 	return KindOther, nil, ""

@@ -78,14 +78,16 @@ export the variable in the shell that launches Claude Code.
 | Var | Default | Notes |
 |---|---|---|
 | `TRANSPORT` | `http` | `http` or `stdio`. HTTP **requires** `AUTH_TOKEN` or the full `MTLS_*` trio. |
-| `PORT` | `8081` | MCP transport port. |
-| `ADMIN_PORT` | `8082` | Admin HTTP port. |
-| `DATA_DIR` | `/data` | Persistent state directory. |
-| `AUTH_TOKEN` | *(unset)* | Bearer token required by MCP HTTP + admin (except `/admin/health`). |
+| `PORT` | `8081` | Serves `/mcp` **and** `/media/<sha256>`. |
+| `DATA_DIR` | `/data` | Persistent state directory (`session.db`, `cache.db`, `media/`). |
+| `AUTH_TOKEN` | *(unset)* | Bearer token required on every HTTP request (`/mcp` and `/media/`). |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | If all three set, client mTLS replaces `AUTH_TOKEN`. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
 | `LOG_FORMAT` | `json` | `json` or `text`. |
+| `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`; least-recently-requested evicted first. `0` = unlimited. |
+| `MEDIA_TTL` | *(unset)* | Go duration (e.g. `168h`); evicts older media. Unset = disabled. |
+| `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period; also runs at startup. |
 
 In production, deliver `AUTH_TOKEN` and `MTLS_*` as tmpfs-mounted files
 referenced by path, not via `-e` — `-e` exposes the secret to anyone
@@ -93,23 +95,28 @@ who can read `/proc/<pid>/environ`.
 
 ## Tools
 
-18 MCP tools today: cache-backed chat / message reads
+20 MCP tools today: cache-backed chat / message reads
 (`list_chats`, `list_conversations`, `get_chat`, `list_messages`,
 `get_message_context`, `get_last_interaction`, `get_contact_chats`,
 `get_direct_chat_by_contact`, `get_conversation`), contacts (`search_contacts`,
 `list_all_contacts`, `get_contact_details`), `get_group_info`,
-`send_message` (text), and the native `ping`, `cache_sync_status`,
-`pairing_start`, `pairing_complete`. Full coverage matrix and
+`send_message` (text), `download_media`, and the native `ping`,
+`cache_sync`, `cache_sync_status`, `pairing_start`, `pairing_complete`.
+Full coverage matrix and
 not-yet-supported list:
 [SUPPORTED.md](https://github.com/angel-manuel/whatsapp-mcp-docker/blob/master/SUPPORTED.md).
+
+`download_media` returns a JSON descriptor, not bytes; fetch the file from
+`GET /media/<sha256>` on the same port with the same bearer token.
 
 ## Operational notes
 
 - **Non-root** (UID 1000). No `NET_ADMIN` / `SYS_ADMIN` needed.
 - **Read-only root filesystem compatible** — mount `/` as `ro`,
   `/data` (and `/tmp`) as `rw`.
-- **Healthcheck built-in** — `whatsapp-mcp --healthcheck` probes
-  `/admin/health`. No shell or curl needed in distroless.
+- **Media is a bounded cache** — `$DATA_DIR/media` holds attachments fetched
+  by `download_media`, capped by `MEDIA_MAX_BYTES` / `MEDIA_TTL`. Evicted
+  blobs are simply re-downloaded on the next call.
 - **One process per `/data`.** Ratchet state rotates on every message;
   startup acquires an exclusive `flock` on `/data/.lock` and exits
   non-zero if another process owns it.

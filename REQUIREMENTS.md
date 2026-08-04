@@ -56,7 +56,9 @@ Each tool's input schema, output shape, and error semantics MUST match the upstr
 
 Beyond the parity surface, the Go build also exposes `get_conversation` — a native, additive read tool with no upstream equivalent. It is the canonical "what's the latest with this person?" front door: it merges every chat for a contact across their phone JID (…@s.whatsapp.net) and privacy LID (…@lid) into one newest-first, de-duplicated timeline of enriched messages. The lower-level per-JID read tools (e.g. `get_direct_chat_by_contact`, `get_contact_chats`) are unchanged and remain available for power use. Like the other cache reads, it is subject to the `not_paired` gate.
 
-In addition to the parity surface, the Go build exposes 2 native tools — `pairing_start`, `pairing_complete` — for agents that drive pairing through the MCP transport. The admin HTTP SSE endpoints (§Pairing) remain the canonical UI-broker path; the two surfaces are mutually exclusive at the wa layer (`adminMu` + `ErrPairInProgress`). These tools, plus `ping`, are exempt from the `not_paired` gate so that a pre-pair agent can bootstrap itself.
+In addition to the parity surface, the Go build exposes 2 native tools — `pairing_start`, `pairing_complete` — for agents that drive pairing through the MCP transport. They are the only pairing path (the admin HTTP SSE endpoints were removed in `99b0ce7`); concurrent flows are serialised at the wa layer (`adminMu` + `ErrPairInProgress`). These tools, plus `ping`, are exempt from the `not_paired` gate so that a pre-pair agent can bootstrap itself.
+
+`download_media` diverges from the upstream reference in one deliberate way: it returns a *descriptor*, never the bytes and never base64. See §Media transfer.
 
 ## Architecture
 
@@ -71,11 +73,13 @@ In addition to the parity surface, the Go build exposes 2 native tools — `pair
 |       v                                                          |
 |   MCP server (stdio or HTTP/SSE on :PORT)                       |
 |       |                                                          |
-|       +---- admin HTTP (pair, health, status) on :ADMIN_PORT    |
+|       +---- GET /media/{sha256} on the SAME :PORT, same bearer   |
+|             (bytes only; MCP cannot carry them)                  |
 |                                                                  |
-|   SQLite:                                                        |
+|   SQLite + blobs:                                                |
 |     /data/session.db  (whatsmeow sqlstore: device, ratchet, ...) |
 |     /data/cache.db    (chats, messages, contacts, nicknames)     |
+|     /data/media/      (downloaded attachments, content-addressed)|
 |                                                                  |
 |   ffmpeg  (shelled out, optional, for audio transcode to Opus)  |
 |                                                                  |
@@ -89,20 +93,26 @@ In addition to the parity surface, the Go build exposes 2 native tools — `pair
 ## Transports
 
 1. **HTTP/SSE MCP** on `BIND_ADDR:PORT` (primary). Suitable for out-of-container MCP clients and for proxying behind another service. Authentication is mandatory when HTTP is enabled (see Security).
-2. **stdio MCP** (local-dev mode). When `TRANSPORT=stdio`, the binary speaks MCP on stdin/stdout and the admin HTTP surface is either disabled or exposed on `localhost` only. Intended for Claude Desktop / `mcp` CLI / test harnesses.
+2. **stdio MCP** (local-dev mode). When `TRANSPORT=stdio`, the binary speaks MCP on stdin/stdout. Intended for Claude Desktop / `mcp` CLI / test harnesses. The media byte route is HTTP-only and therefore unavailable in stdio mode; `download_media` still stores the file under `$DATA_DIR/media`.
+
+## Media transfer
+
+MCP has no useful way to carry binary payloads, and putting attachment bytes into an agent's context is wasteful even when it is possible. Media is therefore split in two:
+
+- **`download_media`** (MCP tool) — input `{ chat_jid, message_id }`. Fetches the attachment from WhatsApp's CDN, stores it content-addressed at `$DATA_DIR/media/<sha256>.<ext>`, and returns `{ media_path, mime, size, filename, sha256 }`. The call is idempotent: a digest already stored is a cache hit with no network I/O. Errors: `not_found` (message not cached), `no_media` (message carries no attachment), `media_unavailable` (locator expired or CDN failure), `internal`.
+- **`GET /media/{sha256}`** (HTTP) — mounted on the same listener as `/mcp`, behind the same bearer auth. Sends `Content-Type`, `Content-Length`, `Content-Disposition`, `ETag`, `Last-Modified` and `Cache-Control`; supports `Range` (`206`). `401` without a valid bearer, `404` for an unknown or evicted digest. The path segment MUST be validated as a 64-character hex digest before any filesystem access.
+
+This is the only non-MCP route the container serves, and it exists solely because MCP structurally cannot transfer bytes. It does not reopen the `:8082` admin API removed in `99b0ce7`.
+
+`media_direct_path` (migration `004`) is what makes downloads durable: the pre-signed `media_url` expires, the direct path does not. It is only present on the live protobuf at ingest time and CANNOT be backfilled, so messages ingested before that migration may only be downloadable until their URL expires. `download_media` MUST say so explicitly and point at `cache_sync` rather than returning an opaque failure.
+
+Retention: `$DATA_DIR/media` is a cache, not a system of record. It is bounded by `MEDIA_MAX_BYTES` (least-recently-requested evicted first) and optionally `MEDIA_TTL`, swept at startup and every `MEDIA_SWEEP_INTERVAL`. An evicted blob costs a re-download, not data.
 
 ## Pairing
 
-The container MUST expose pairing programmatically so that an external UI (or an MCP-driven agent) can broker it without shipping its own whatsmeow client. Both surfaces below sit on top of the same `wa.Client.StartPairing` entry point and are mutually exclusive: whichever opens the flow first holds it; the other receives `pair_in_progress` until the flow ends.
+The container MUST expose pairing programmatically so that an external UI (or an MCP-driven agent) can broker it without shipping its own whatsmeow client. Pairing is driven entirely through the MCP tools below, on top of `wa.Client.StartPairing`. Only one flow may be open at a time; a second caller receives `pair_in_progress` until the first flow ends.
 
-### Pairing — admin HTTP
-
-- `POST /admin/pair/start` → opens a Server-Sent Events stream. Event types mirror `whatsmeow.QRChannelItem`:
-  - `code`   — rotating pairing payload + `timeout_ms` for UI refresh
-  - `success` — paired; session persisted; MCP tools become operational
-  - `timeout`, `error`, `client-outdated`, `scanned-without-multidevice` — terminal
-- `POST /admin/pair/phone` with `{ phone }` → returns `{ linking_code }` for phone-number pairing (no QR). Same underlying lifecycle; success/failure events also arrive on `/admin/pair/start` if that stream is open.
-- `POST /admin/unpair` → logs the device out cleanly and deletes `/data/session.db`.
+> The admin HTTP surface that previously fronted pairing (`POST /admin/pair/start`, `POST /admin/pair/phone`, `POST /admin/unpair`, on `:ADMIN_PORT`) was removed in `99b0ce7`. Everything that can be a tool is a tool.
 
 ### Pairing — MCP tools
 
@@ -130,9 +140,8 @@ The container MUST surface these events to the outside world (for external orche
 - `connected`, `disconnected` — transport-level state.
 
 Event delivery:
-- Always visible via `GET /admin/events` (SSE stream).
 - Mirrored as MCP notifications (`notifications/session`) when the MCP transport supports them.
-- Summarised in the response of `GET /admin/status`.
+- Summarised by the `ping` and `cache_sync_status` tools.
 
 When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try to recover with stale credentials. It stays in `not_paired` state and waits for explicit re-pair.
 
@@ -141,17 +150,19 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 | Var | Default | Purpose |
 |---|---|---|
 | `TRANSPORT` | `http` | `http` or `stdio` |
-| `BIND_ADDR` | `0.0.0.0` | MCP + admin bind address |
-| `PORT` | `8081` | MCP HTTP/SSE port |
-| `ADMIN_PORT` | `8082` | Admin HTTP port (pair, health, events, status) |
-| `DATA_DIR` | `/data` | Persistent state dir |
+| `BIND_ADDR` | `0.0.0.0` | HTTP bind address |
+| `PORT` | `8081` | Serves both `/mcp` and `/media/{sha256}` |
+| `DATA_DIR` | `/data` | Persistent state dir (`session.db`, `cache.db`, `media/`) |
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
-| `AUTH_TOKEN` | *(unset)* | Required bearer token for HTTP MCP + admin. REQUIRED in `http` mode. |
+| `AUTH_TOKEN` | *(unset)* | Required bearer token for every HTTP route (`/mcp` and `/media/`). REQUIRED in `http` mode. |
 | `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | If all three are set, requires client mTLS and ignores `AUTH_TOKEN`. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Shown on the user's phone after pairing. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Used by `send_audio_message`; absent → audio conversion disabled, Opus input required. |
-| `ENABLE_PPROF` | `false` | Exposes `/debug/pprof` on the admin port when true. |
+| `ENABLE_PPROF` | `false` | Exposes `/debug/pprof` when true. |
+| `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`. Over the cap, least-recently-requested blobs are evicted. `0` = unlimited. |
+| `MEDIA_TTL` | *(unset)* | Go duration; evicts media older than this. Unset/`0` disables age-based eviction. |
+| `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period. A sweep also runs at startup. |
 
 No long-lived secrets in env vars in production: operators should deliver `AUTH_TOKEN`, `MTLS_*` via a secret store mount (tmpfs file + `file://` reference) rather than `-e`.
 
@@ -175,9 +186,9 @@ No long-lived secrets in env vars in production: operators should deliver `AUTH_
 
 - Structured JSON logs to stdout; one event per line; includes `connection_id` (if passed via env) and a stable `event_type`.
 - `GET /healthz` — unauthenticated liveness probe (HTTP server up and routing); drives the container HEALTHCHECK via `whatsapp-mcp --healthcheck`.
-- `GET /admin/ready` — readiness (connected + logged in).
-- `GET /admin/status` — snapshot: `{ connected, logged_in, jid, pushname, last_event, uptime_s }`.
-- `GET /admin/metrics` — Prometheus exposition (counters for tool calls, message send/recv, reconnect attempts; gauges for connection state; histogram for whatsmeow IQ round-trip).
+- `ping` (MCP tool) — readiness: liveness + pairing state. Exempt from the `not_paired` gate, so it answers before the device is linked.
+- `cache_sync_status` (MCP tool) — cache counts, last ingested event, current/most-recent sync run.
+- Prometheus exposition is not implemented yet.
 
 ## Build & release
 

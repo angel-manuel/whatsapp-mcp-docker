@@ -37,6 +37,7 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Contact details (cache + live status / pic)  | `get_contact_details` | `UserInfo`, `IsOnWhatsApp`, `ProfilePictureURL`               |
 | Authoritative group metadata                 | `get_group_info`      | `GetGroupInfo`                                                |
 | Send text message                            | `send_message`        | `SendMessage` (text only)                                     |
+| Download a message attachment                | `download_media`      | `DownloadMediaWithPath`, `Download` (URL fallback)            |
 | Start a pair flow                            | `pairing_start`       | `StartPairing`, `PairPhone`                                   |
 | Poll an in-progress pair flow                | `pairing_complete`    | `PairWaitNext` / `PairLatest`                                 |
 
@@ -61,15 +62,23 @@ events arrive.
 | `*events.Archive`           | archived flag                                  |
 | `*events.Star`              | chat row only (no `messages.starred` yet)      |
 
-### Admin HTTP endpoints (`internal/admin`, not MCP)
+Media envelopes additionally persist `media_direct_path` (migration `004`),
+which is what `download_media` needs to re-request the CDN object after the
+pre-signed `media_url` expires. It is captured at ingest and cannot be
+backfilled — rows older than that migration must be re-ingested via
+`cache_sync` before their media can be downloaded.
 
-| Endpoint                | Backed by                         |
-| ----------------------- | --------------------------------- |
-| `GET  /admin/health`    | `wa.Client.Status`                |
-| `GET  /admin/state`     | session lifecycle SSE             |
-| `POST /admin/pair/start`| `wa.Client.StartPairing`          |
-| `POST /admin/pair/phone`| `wa.Client.PairPhone`             |
-| `POST /admin/unpair`    | `wa.Client.Unpair` (i.e. Logout)  |
+### HTTP routes (not MCP)
+
+Mounted on the same listener and behind the same bearer auth as `/mcp`. This
+is not a general-purpose API: the only non-MCP route is the one thing MCP
+structurally cannot do, which is transfer bytes. The former `internal/admin`
+package and its `:8082` surface were removed in `99b0ce7`; pairing and health
+are MCP tools (`pairing_start`, `pairing_complete`, `ping`).
+
+| Endpoint               | Backed by                                        |
+| ---------------------- | ------------------------------------------------ |
+| `GET /media/{sha256}`  | `media.Store` — serves blobs stored by `download_media`; `Range`, `ETag`, `Content-Disposition` |
 
 ---
 
@@ -143,9 +152,9 @@ the highest user-value gaps.
 
 | whatsmeow                                                                  | Notes                                                          |
 | -------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| ⭐ `Download` / `DownloadAny` / `DownloadToFile` / `DownloadThumbnail`     | fetch the bytes for cached image/video/audio/document rows.    |
+| `DownloadThumbnail`                                                        | link-preview thumbnails; `JPEGThumbnail` is not captured at ingest today. |
 | `DownloadHistorySync`                                                      | large blob retrieval.                                          |
-| `DownloadMediaWithPath` / `DownloadMediaWithPathToFile`                    | typed CDN-backed download.                                     |
+| `DownloadToFile` / `DownloadMediaWithPathToFile`                           | streaming-to-disk variants. `download_media` buffers in memory and writes content-addressed. |
 | `DownloadFB` / `DownloadFBToFile`                                          | Facebook CDN variant.                                          |
 | `Upload` / `UploadReader`                                                  | required by any media-send tool.                               |
 | `DeleteMedia`                                                              | server-side delete.                                            |

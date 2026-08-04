@@ -56,6 +56,10 @@ func (f *fakeWA) SendMessage(context.Context, types.JID, *waE2E.Message) (whatsm
 }
 func (f *fakeWA) OwnJID() types.JID { return types.JID{} }
 
+// Whatsmeow is never exercised by the pairing tests; download_media is the
+// only caller and it supplies its own MediaDownloader.
+func (f *fakeWA) Whatsmeow() *whatsmeow.Client { return nil }
+
 // Sync surface — pairing tests don't drive it; defaults make IsLoggedIn
 // reflect "active session" (so cache_sync's pre-flight wouldn't reject
 // in pairing tests, though those tests never call cache_sync).
