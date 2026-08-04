@@ -3,11 +3,21 @@ name: release
 # Publishes the container image to Docker Hub.
 #
 # Triggered by:
-#   * pushing a SemVer tag  (v1.2.3, v1.2.3-rc1, …)  → full release with GH
-#     release notes + SBOM attachments.
+#   * the release-please workflow, once it merges a release PR and creates the
+#     tag → called as a reusable workflow with that tag. This is the normal
+#     path: release-please owns the version, the tag and the changelog, and
+#     this workflow only builds the images and appends their coordinates to
+#     the release it already created.
+#   * pushing a SemVer tag (v1.2.3, v1.2.3-rc1, …) by hand → same build; it
+#     creates the GitHub release if release-please has not.
 #   * manually via the Actions UI (workflow_dispatch) → builds + pushes the
 #     branch-qualified tags (e.g. :master, :master-slim) so operators can
 #     smoke-test the pipeline without cutting a release.
+#
+# The reusable-workflow entry point exists because a tag created by
+# release-please with the default GITHUB_TOKEN does NOT fire `on: push: tags`
+# — GitHub suppresses workflow triggers from GITHUB_TOKEN-authored events to
+# prevent recursion. Calling this workflow directly sidesteps that with no PAT.
 #
 # Required repository secrets:
 #   DOCKERHUB_USERNAME  — Docker Hub account that owns the namespace.
@@ -21,6 +31,12 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v1.2.3)."
+        required: true
+        type: string
   workflow_dispatch:
 
 permissions:
@@ -31,6 +47,9 @@ permissions:
 env:
   IMAGE_NAME: docker.io/angelmanuel/whatsapp-mcp
   PLATFORMS: linux/amd64,linux/arm64
+  # The tag being released: from the caller, or from the ref on a direct tag
+  # push. Empty on a branch dispatch, which builds images but cuts no release.
+  REF_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
 
 jobs:
   build:
@@ -49,10 +68,33 @@ jobs:
     outputs:
       digest-distroless: ${{ steps.capture.outputs.digest-distroless }}
       digest-slim:       ${{ steps.capture.outputs.digest-slim }}
-      version:           ${{ steps.meta.outputs.version }}
+      tag:               ${{ steps.capture.outputs.tag }}
+      version:           ${{ steps.capture.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # On a workflow_call the ref is the caller's branch, so check the tag
+          # out explicitly — otherwise this builds whatever master points at
+          # when the job starts rather than the released commit.
+          ref: ${{ env.REF_TAG || github.ref }}
+
+      # The version every artifact is stamped with, derived from the tag rather
+      # than from docker/metadata-action. metadata-action folds the `suffix=`
+      # flavor into its `version` output, so the slim row reports `0.5.0-slim`;
+      # using that for anything but tag names mislabels the distroless build,
+      # and since matrix job outputs are last-writer-wins it poisoned the
+      # release notes for both variants (v0.5.0 shipped advertising the
+      # distroless image as `:0.5.0-slim` and the slim one as
+      # `:0.5.0-slim-slim`).
+      - name: Derive version
+        id: version
+        run: |
+          if [ -n "$REF_TAG" ]; then
+            echo "value=${REF_TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -76,6 +118,11 @@ jobs:
           flavor: |
             latest=auto
             suffix=${{ matrix.suffix }},onlatest=true
+          # `value=` is what makes the semver rows work when this workflow is
+          # *called*: github.ref is then the caller's branch, not the tag. On a
+          # branch dispatch REF_TAG is empty, metadata-action falls back to the
+          # ref, and the semver rows are skipped with a warning — intended.
+          #
           # The `type=raw` line below also publishes :latest (and :latest-slim
           # via `onlatest=true`) on a manual `workflow_dispatch` from master.
           # That keeps :latest pointing at master in the pre-1.0 window when
@@ -83,9 +130,12 @@ jobs:
           # takes over and overwrites :latest with the released version.
           # Manual dispatches from non-master branches do *not* touch :latest.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=ref,event=branch
+            type=semver,pattern={{version}},value=${{ env.REF_TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.REF_TAG }}
+            # Only on branch dispatches: a release build runs with the
+            # caller's ref (master), and without this guard it would republish
+            # :master from the release job.
+            type=ref,event=branch,enable=${{ env.REF_TAG == '' }}
             type=sha,format=short
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' }}
           labels: |
@@ -102,7 +152,7 @@ jobs:
           platforms: ${{ env.PLATFORMS }}
           push: true
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=${{ steps.version.outputs.value }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
@@ -113,30 +163,35 @@ jobs:
       - name: Record digest output
         id: capture
         run: |
-          echo "digest-${{ matrix.variant }}=${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          {
+            echo "digest-${{ matrix.variant }}=${{ steps.push.outputs.digest }}"
+            echo "tag=$REF_TAG"
+            echo "version=${{ steps.version.outputs.value }}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Generate SPDX SBOM (syft)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.REF_TAG != ''
         uses: anchore/sbom-action@v0
         with:
           image: ${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
           format: spdx-json
-          output-file: whatsapp-mcp-${{ steps.meta.outputs.version }}${{ matrix.suffix }}.spdx.json
-          # Unique artifact name per matrix row — actions/upload-artifact@v4
-          # rejects duplicate names across jobs in the same run.
-          artifact-name: sbom-${{ matrix.variant }}
+          output-file: whatsapp-mcp-${{ steps.version.outputs.value }}${{ matrix.suffix }}.spdx.json
+          # `artifact-name` names the FILE inside the upload, not just the
+          # artifact, so it has to end in .spdx.json — as plain
+          # `sbom-<variant>` it silently made the release job's
+          # `sboms/*.spdx.json` glob match nothing. It must also stay unique
+          # per matrix row: upload-artifact@v4 rejects duplicate names across
+          # jobs in the same run.
+          artifact-name: whatsapp-mcp-${{ steps.version.outputs.value }}${{ matrix.suffix }}.spdx.json
           upload-artifact: true
           upload-release-assets: false
 
   release-notes:
     name: release-notes
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.build.outputs.tag != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Download SBOM artifacts
         uses: actions/download-artifact@v4
         with:
@@ -145,7 +200,7 @@ jobs:
           # blobs that build-push-action@v6 auto-attaches when `provenance:
           # true`, and one of those occasionally fails to download — failing
           # the whole job even though the images and SBOMs are fine.
-          pattern: sbom-*
+          pattern: whatsapp-mcp-*.spdx.json
           path: sboms
           merge-multiple: true
 
@@ -181,10 +236,17 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
+      - name: Attach images and SBOMs to the release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          # release-please has already written the changelog into the release
+          # body by the time this runs, so append instead of replacing it. On a
+          # hand-pushed tag no release exists yet and this creates one.
+          append_body: true
           body: ${{ steps.body.outputs.body }}
-          prerelease: ${{ contains(github.ref, '-') }}
+          prerelease: ${{ contains(needs.build.outputs.tag, '-') }}
           files: sboms/*.spdx.json
-          fail_on_unmatched_files: false
+          # Loud on purpose: `false` silently shipped a release whose body
+          # claimed SBOMs were attached when none were.
+          fail_on_unmatched_files: true
