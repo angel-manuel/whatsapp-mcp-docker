@@ -193,13 +193,13 @@ the highest user-value gaps.
 | `FetchAppState`                                    | full re-sync of app state (chats list, contacts, settings, mute, archive, pin). Could power a "reconcile cache" tool.   |
 | `SendAppState`                                     | advanced; mirror local state to the WhatsApp server (e.g. mark a chat read across devices). |
 
-### Lifecycle / connection (admin-side)
+### Lifecycle / connection
 
 | whatsmeow                                       | Notes                                                                          |
 | ----------------------------------------------- | ------------------------------------------------------------------------------ |
 | `Connect` / `ConnectContext` / `Disconnect`     | manual reconnect control. Indirectly driven by pairing today.                  |
 | `IsConnected` / `IsLoggedIn`                    | low-level state probes (we expose `Status` instead, which is richer).          |
-| `Logout`                                        | exposed via `POST /admin/unpair`, no MCP tool.                                 |
+| `Logout`                                        | no tool. The `POST /admin/unpair` endpoint that used to expose it was removed in `99b0ce7`. |
 | `ResetConnection`                               | force-reset the websocket.                                                     |
 | `WaitForConnection`                             | block until connected.                                                         |
 

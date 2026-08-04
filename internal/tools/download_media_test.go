@@ -25,7 +25,10 @@ import (
 // rather than only that bytes came back.
 type fakeDownloader struct {
 	data []byte
-	err  error
+	// err is returned alongside data. whatsmeow returns both when a
+	// download succeeded but tripped a non-fatal validation warning, so the
+	// fake has to be able to model that pair too.
+	err error
 
 	pathCalls int
 	urlCalls  int
@@ -390,4 +393,101 @@ func TestDownloadMedia_NotPairedIsGated(t *testing.T) {
 		"chat_jid": mediaChatJID, "message_id": "wamid.X",
 	})
 	expectError(t, res, mcp.ErrNotPaired)
+}
+
+// TestDownloadMedia_ToleratesFileLengthWarning covers acceptWarnings' accept
+// branch. whatsmeow returns the decrypted bytes *and* ErrFileLengthMismatch
+// when the advertised length disagrees with what arrived — routine for voice
+// notes, and harmless because the plaintext SHA-256 is still verified.
+// Treating it as fatal would break audio downloads outright.
+func TestDownloadMedia_ToleratesFileLengthWarning(t *testing.T) {
+	payload := []byte("voice note bytes")
+	dl := &fakeDownloader{data: payload, err: whatsmeow.ErrFileLengthMismatch}
+	h := newHarnessWithDeps(t, true,
+		seedMedia("wamid.VN", cache.KindAudio, "audio/ogg; codecs=opus", "", "", "/v/t62/aud", payload),
+		nil,
+		func(d *tools.Deps) { d.Downloader = dl })
+
+	res := callTool(t, h, "download_media", map[string]any{
+		"chat_jid": mediaChatJID, "message_id": "wamid.VN",
+	})
+	if res.IsError {
+		t.Fatalf("length warning treated as fatal: %+v", structured(t, res))
+	}
+	out := structured(t, res)
+	sum := sha256.Sum256(payload)
+	if got := out["sha256"]; got != hex.EncodeToString(sum[:]) {
+		t.Errorf("sha256 = %v", got)
+	}
+}
+
+// TestDownloadMedia_IntegrityFailureIsNotTolerated is the other side of
+// acceptWarnings: a plaintext hash mismatch means the bytes are not what the
+// message says they are, and must never be stored or served as if they were.
+func TestDownloadMedia_IntegrityFailureIsNotTolerated(t *testing.T) {
+	payload := []byte("corrupted")
+	dl := &fakeDownloader{data: payload, err: whatsmeow.ErrInvalidMediaSHA256}
+	h := newHarnessWithDeps(t, true,
+		seedMedia("wamid.BAD", cache.KindImage, "image/jpeg", "", "", "/v/t62/img", payload),
+		nil,
+		func(d *tools.Deps) { d.Downloader = dl })
+
+	res := callTool(t, h, "download_media", map[string]any{
+		"chat_jid": mediaChatJID, "message_id": "wamid.BAD",
+	})
+	expectError(t, res, mcp.ErrMediaUnavailable)
+
+	entries, err := os.ReadDir(h.media.Dir())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("integrity-failed bytes were stored: %d entries", len(entries))
+	}
+}
+
+// TestDownloadMedia_ResolvesAcrossLinkedJIDs covers the alias retry. WhatsApp
+// splits one human across a phone JID and a privacy LID, and the merged
+// get_conversation view hands out message_ids from both — so a download must
+// not depend on the caller guessing which identity the row was stored under.
+func TestDownloadMedia_ResolvesAcrossLinkedJIDs(t *testing.T) {
+	const lidJID = "185551234567890@lid"
+	payload := []byte("stored under the LID")
+	dl := &fakeDownloader{data: payload}
+
+	h := newHarnessWithDeps(t, true, func(s *cache.Store) {
+		if err := s.UpsertJIDAlias(context.Background(), lidJID, mediaChatJID); err != nil {
+			panic(err)
+		}
+		sum := sha256.Sum256(payload)
+		if err := s.InsertMessage(context.Background(), cache.Message{
+			ID: "wamid.ALIAS", ChatJID: lidJID, SenderJID: lidJID,
+			Timestamp: time.Unix(1_700_000_000, 0).UTC(), Kind: cache.KindImage,
+			Media: &cache.Media{
+				Mime: "image/jpeg", DirectPath: "/v/t62/img",
+				Key: []byte{0x11}, SHA256: sum[:], EncSHA256: []byte{0x22},
+				Length: uint64(len(payload)),
+			},
+		}); err != nil {
+			panic(err)
+		}
+	}, nil, func(d *tools.Deps) { d.Downloader = dl })
+
+	// Ask using the phone JID even though the row lives under the LID.
+	res := callTool(t, h, "download_media", map[string]any{
+		"chat_jid": mediaChatJID, "message_id": "wamid.ALIAS",
+	})
+	if res.IsError {
+		t.Fatalf("linked-JID lookup failed: %+v", structured(t, res))
+	}
+	sum := sha256.Sum256(payload)
+	if got := structured(t, res)["sha256"]; got != hex.EncodeToString(sum[:]) {
+		t.Errorf("sha256 = %v", got)
+	}
+
+	// An id that exists under neither identity is still not_found, so the
+	// retry cannot mask a genuine miss.
+	expectError(t, callTool(t, h, "download_media", map[string]any{
+		"chat_jid": mediaChatJID, "message_id": "wamid.ABSENT",
+	}), mcp.ErrNotFound)
 }

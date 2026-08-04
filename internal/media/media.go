@@ -17,6 +17,14 @@
 // Content-Type and Content-Disposition without consulting the message cache;
 // the store is self-describing and can be swept, backed up, or wiped on its
 // own.
+//
+// The two files also carry two different timestamps, which is what lets
+// retention be both age-aware and usage-aware without a database:
+//
+//	blob mtime      when the bytes were downloaded. Never rewritten, so
+//	                Last-Modified is stable and TTL means real age.
+//	sidecar mtime   when the object was last resolved (served or looked
+//	                up). This is the recency signal for LRU eviction.
 package media
 
 import (
@@ -119,8 +127,8 @@ func (s *Store) Dir() string { return s.dir }
 //
 // mime and filename describe the blob for the byte route; an empty mime
 // becomes DefaultMime and an empty filename is synthesised from the digest.
-// A cache hit bumps the blob's mtime, which is what keeps recently-requested
-// media alive under size-based eviction (see Sweep).
+// A cache hit counts as a use (see touch), which is what keeps
+// recently-requested media alive under size-based eviction (see Sweep).
 func (s *Store) Put(data []byte, mimeType, filename string) (Descriptor, error) {
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
@@ -167,8 +175,9 @@ func (s *Store) Put(data []byte, mimeType, filename string) (Descriptor, error) 
 	return meta.descriptor(), nil
 }
 
-// Lookup returns the descriptor for digest without opening the blob.
-// Returns ErrNotFound if either the sidecar or the blob is missing.
+// Lookup returns the descriptor for digest without opening the blob, and
+// records the object as used. Returns ErrNotFound if either the sidecar or
+// the blob is missing.
 func (s *Store) Lookup(digest string) (Descriptor, error) {
 	meta, err := s.readSidecar(digest)
 	if err != nil {
@@ -180,11 +189,17 @@ func (s *Store) Lookup(digest string) (Descriptor, error) {
 		}
 		return Descriptor{}, fmt.Errorf("media: stat blob %s: %w", digest, err)
 	}
+	s.touch(meta)
 	return meta.descriptor(), nil
 }
 
-// Open returns an open handle to the blob plus its descriptor and mtime. The
-// caller owns the returned file and must close it.
+// Open returns an open handle to the blob plus its descriptor and the time
+// the bytes were stored, and records the object as used. The caller owns the
+// returned file and must close it.
+//
+// The returned time is the blob's own mtime, which never changes — so
+// Last-Modified stays stable across requests even though each request counts
+// as a use for eviction purposes.
 func (s *Store) Open(digest string) (*os.File, Descriptor, time.Time, error) {
 	meta, err := s.readSidecar(digest)
 	if err != nil {
@@ -202,6 +217,7 @@ func (s *Store) Open(digest string) (*os.File, Descriptor, time.Time, error) {
 		_ = f.Close()
 		return nil, Descriptor{}, time.Time{}, fmt.Errorf("media: stat blob %s: %w", digest, err)
 	}
+	s.touch(meta)
 	return f, meta.descriptor(), info.ModTime(), nil
 }
 
@@ -233,12 +249,15 @@ func (s *Store) blobPath(meta sidecar) string {
 	return filepath.Join(s.dir, meta.SHA256+sanitizeExt(meta.Ext))
 }
 
-// touch bumps the blob's mtime so size-based eviction treats a
-// recently-requested object as recently used. Failures are ignored: a blob
-// that cannot be touched is still perfectly serveable, it just ages sooner.
+// touch records the object as used, by bumping the *sidecar's* mtime. The
+// blob's own mtime is deliberately left alone: it is both the Last-Modified
+// this store serves and the age TTL measures, and neither should move just
+// because someone read the file.
+//
+// Failures are ignored. A blob that cannot be touched is still perfectly
+// serveable; it just looks staler than it is to the next sweep.
 func (s *Store) touch(meta sidecar) {
 	now := time.Now()
-	_ = os.Chtimes(s.blobPath(meta), now, now)
 	_ = os.Chtimes(filepath.Join(s.dir, meta.SHA256+".json"), now, now)
 }
 

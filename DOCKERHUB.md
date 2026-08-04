@@ -5,10 +5,11 @@ server for AI agents (Claude Code, Cursor, any MCP HTTP client). Pull the
 image, run it, and your agent pairs the phone and controls WhatsApp — all
 through MCP.
 
-Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 18
+Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 20
 MCP tools today (cache-backed chat / message reads, contact and group
-lookup, `send_message`, `ping`, `cache_sync_status`, plus native
-`pairing_start` / `pairing_complete`); coverage and gaps are tracked
+lookup, `send_message`, `download_media`, `ping`, `cache_sync` /
+`cache_sync_status`, plus native `pairing_start` /
+`pairing_complete`); coverage and gaps are tracked
 in [SUPPORTED.md](https://github.com/angel-manuel/whatsapp-mcp-docker/blob/master/SUPPORTED.md).
 Source, full docs, and changelog:
 **[github.com/angel-manuel/whatsapp-mcp-docker](https://github.com/angel-manuel/whatsapp-mcp-docker)**.

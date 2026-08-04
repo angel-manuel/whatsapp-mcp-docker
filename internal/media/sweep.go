@@ -28,21 +28,27 @@ type SweepResult struct {
 	RemainingBytes int64
 }
 
-// entry is one stored blob as seen by the sweeper.
+// entry is one stored blob as seen by the sweeper. The two timestamps come
+// from different files on purpose: storedAt is the blob's own mtime (never
+// rewritten), usedAt is the sidecar's (bumped by every Lookup/Open).
 type entry struct {
-	digest  string
-	name    string
-	size    int64
-	modTime time.Time
+	digest   string
+	name     string
+	size     int64
+	storedAt time.Time
+	usedAt   time.Time
 }
 
 // Sweep enforces the configured retention policy against the wall clock
 // value now. It runs in two passes:
 //
-//  1. TTL: anything older than Options.TTL is removed outright.
-//  2. Size: while the store exceeds Options.MaxBytes, the oldest remaining
-//     blob is removed. Put bumps mtime on a cache hit, so "oldest" means
-//     least recently requested rather than merely first downloaded.
+//  1. TTL: anything *downloaded* longer than Options.TTL ago is removed
+//     outright. Age is the blob's own mtime, so re-reading a file does not
+//     keep it alive past its expiry.
+//  2. Size: while the store exceeds Options.MaxBytes, the least recently
+//     *used* blob is removed. Recency is the sidecar's mtime, which Lookup
+//     and Open bump on every hit — so a blob fetched every minute outlives
+//     one downloaded later and never touched again.
 //
 // Orphans (a blob with no sidecar, a sidecar with no blob, an abandoned temp
 // file) are cleaned up as they are encountered: they would otherwise consume
@@ -57,7 +63,8 @@ func (s *Store) Sweep(now time.Time) (SweepResult, error) {
 	}
 
 	blobs := make(map[string]*entry, len(dirEntries))
-	sidecars := make(map[string]struct{}, len(dirEntries))
+	// digest -> sidecar mtime, i.e. when the object was last resolved.
+	sidecars := make(map[string]time.Time, len(dirEntries))
 
 	for _, de := range dirEntries {
 		if de.IsDir() {
@@ -78,14 +85,24 @@ func (s *Store) Sweep(now time.Time) (SweepResult, error) {
 			continue // not ours; leave it alone
 		}
 		if strings.HasSuffix(name, ".json") {
-			sidecars[digest] = struct{}{}
+			used := time.Time{}
+			if info, err := de.Info(); err == nil {
+				used = info.ModTime()
+			}
+			sidecars[digest] = used
 			continue
 		}
 		info, err := de.Info()
 		if err != nil {
 			continue
 		}
-		blobs[digest] = &entry{digest: digest, name: name, size: info.Size(), modTime: info.ModTime()}
+		blobs[digest] = &entry{
+			digest: digest, name: name, size: info.Size(),
+			// usedAt is filled in from the sidecar below; until then, fall
+			// back to the stored time so a blob missing its sidecar mtime
+			// is never treated as infinitely fresh.
+			storedAt: info.ModTime(), usedAt: info.ModTime(),
+		}
 	}
 
 	var res SweepResult
@@ -100,7 +117,8 @@ func (s *Store) Sweep(now time.Time) (SweepResult, error) {
 
 	for digest, b := range blobs {
 		res.ScannedBlobs++
-		if _, ok := sidecars[digest]; !ok {
+		used, ok := sidecars[digest]
+		if !ok {
 			// Orphaned blob: unreachable through Lookup, so it is dead
 			// weight regardless of age.
 			s.remove(filepath.Join(s.dir, b.name))
@@ -108,7 +126,10 @@ func (s *Store) Sweep(now time.Time) (SweepResult, error) {
 			res.FreedBytes += b.size
 			continue
 		}
-		if s.opts.TTL > 0 && now.Sub(b.modTime) > s.opts.TTL {
+		if !used.IsZero() {
+			b.usedAt = used
+		}
+		if s.opts.TTL > 0 && now.Sub(b.storedAt) > s.opts.TTL {
 			s.evict(b)
 			res.ExpiredBlobs++
 			res.FreedBytes += b.size
@@ -119,13 +140,13 @@ func (s *Store) Sweep(now time.Time) (SweepResult, error) {
 	}
 
 	if s.opts.MaxBytes > 0 && res.RemainingBytes > s.opts.MaxBytes {
-		// Oldest first, digest as a tiebreak so the pass is deterministic
-		// when several blobs share an mtime.
+		// Least recently used first, digest as a tiebreak so the pass is
+		// deterministic when several blobs share a timestamp.
 		sort.Slice(live, func(i, j int) bool {
-			if live[i].modTime.Equal(live[j].modTime) {
+			if live[i].usedAt.Equal(live[j].usedAt) {
 				return live[i].digest < live[j].digest
 			}
-			return live[i].modTime.Before(live[j].modTime)
+			return live[i].usedAt.Before(live[j].usedAt)
 		})
 		for _, b := range live {
 			if res.RemainingBytes <= s.opts.MaxBytes {

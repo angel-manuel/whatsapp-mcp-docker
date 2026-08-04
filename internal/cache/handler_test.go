@@ -319,6 +319,30 @@ func TestGetMessageMedia_TextMessageHasNoMedia(t *testing.T) {
 	}
 }
 
+// TestGetMessageMedia_MissingTimestampStaysZero keeps "unknown time"
+// distinguishable from "the epoch". download_media synthesises a filename
+// from this timestamp and needs to fall back when it was never recorded;
+// silently returning 1970-01-01 would make that fallback unreachable.
+func TestGetMessageMedia_MissingTimestampStaysZero(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	chat := "1234567890@s.whatsapp.net"
+	if err := store.InsertMessage(ctx, Message{
+		ID: "wamid.NOTS", ChatJID: chat, SenderJID: chat, Kind: KindImage,
+		Media: &Media{Mime: "image/jpeg", Key: []byte{0x01}, DirectPath: "/v/x"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	row, err := store.GetMessageMedia(ctx, chat, "wamid.NOTS")
+	if err != nil {
+		t.Fatalf("GetMessageMedia: %v", err)
+	}
+	if !row.Timestamp.IsZero() {
+		t.Fatalf("Timestamp = %s, want the zero time", row.Timestamp)
+	}
+}
+
 func TestHandleEvent_ProtocolRevoke_MarksDeletedKeepsRow(t *testing.T) {
 	ingest, store := newTestIngestor(t)
 

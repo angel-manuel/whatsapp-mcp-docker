@@ -10,12 +10,12 @@ MCP transport, pairing, session persistence — runs in **one Go process**
 inside **one Docker image**. No sidecars, no compose bundle, no second
 language runtime.
 
-Today the server ships **18 MCP tools**: cache-backed read tools for
-chats and messages, plus `send_message`, contact / group lookups, a
-diagnostic `cache_sync_status`, the `ping` health check, and the native
-`pairing_start` / `pairing_complete` tools that let an agent drive the
-link flow over MCP itself. The full coverage matrix — including
-whatsmeow capabilities not yet exposed — lives in
+Today the server ships **20 MCP tools**: cache-backed read tools for
+chats and messages, plus `send_message`, `download_media`, contact /
+group lookups, `cache_sync` / `cache_sync_status`, the `ping` health
+check, and the native `pairing_start` / `pairing_complete` tools that let
+an agent drive the link flow over MCP itself. The full coverage matrix —
+including whatsmeow capabilities not yet exposed — lives in
 [SUPPORTED.md](SUPPORTED.md).
 
 > ⚠️ **Unofficial.** This project uses `whatsmeow`, an unofficial

@@ -255,7 +255,11 @@ SELECT chat_jid, id, kind, ts, media_mime, media_filename, media_url, media_dire
 		return MediaRow{}, fmt.Errorf("cache: get message media %s/%s: %w", chatJID, id, err)
 	}
 	out.Kind = MessageKind(kind)
-	out.Timestamp = time.Unix(ts, 0).UTC()
+	// A row with no recorded ts keeps the zero time.Time rather than
+	// becoming 1970-01-01, so callers can tell "unknown" from "epoch".
+	if ts > 0 {
+		out.Timestamp = time.Unix(ts, 0).UTC()
+	}
 	if length > 0 {
 		out.Length = uint64(length)
 	}

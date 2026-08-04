@@ -2,8 +2,11 @@ package media
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+
+	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
 )
 
 // Handler serves stored blobs at RoutePrefix + "{sha256}". It is mounted by
@@ -40,6 +43,12 @@ func (s *Store) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		// A 500 here means a corrupt sidecar, EACCES, EIO or a descriptor
+		// shortage — none of which the response body may disclose, and all
+		// of which an operator needs to see. There is no access-log
+		// middleware in front of this route, so log it ourselves.
+		applog.WithEvent(s.log, "media.serve").Error("serve blob failed",
+			slog.String("sha256", digest), slog.String("err", err.Error()))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

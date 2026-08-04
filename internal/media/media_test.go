@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -196,6 +198,10 @@ func TestSweep_TTLEvictsOldBlobs(t *testing.T) {
 	}
 
 	backdate(t, s, old.SHA256, ".jpg", time.Now().Add(-2*time.Hour))
+	// Reading it does NOT reset its age: TTL measures time since download.
+	if _, err := s.Lookup(old.SHA256); err != nil {
+		t.Fatalf("Lookup old: %v", err)
+	}
 
 	res, err := s.Sweep(time.Now())
 	if err != nil {
@@ -212,9 +218,9 @@ func TestSweep_TTLEvictsOldBlobs(t *testing.T) {
 	}
 }
 
-func TestSweep_MaxBytesEvictsOldestFirst(t *testing.T) {
+func TestSweep_MaxBytesEvictsLeastRecentlyUsed(t *testing.T) {
 	// Three 10-byte blobs, cap of 25: exactly one must go, and it must be
-	// the least recently touched.
+	// the least recently used.
 	s := newTestStore(t, Options{MaxBytes: 25})
 	var digests []string
 	for _, body := range []string{"aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"} {
@@ -290,13 +296,92 @@ func TestSweep_RemovesOrphansAndStaleTempFiles(t *testing.T) {
 	}
 }
 
-// backdate rewinds a stored blob's mtime (and its sidecar's) so retention
-// tests do not have to sleep.
+// backdate rewinds both of a stored object's timestamps — the blob's
+// (download time, what TTL measures) and the sidecar's (last use, what LRU
+// measures) — so retention tests do not have to sleep.
 func backdate(t *testing.T, s *Store, digest, ext string, to time.Time) {
 	t.Helper()
 	for _, name := range []string{digest + ext, digest + ".json"} {
 		if err := os.Chtimes(filepath.Join(s.Dir(), name), to, to); err != nil {
 			t.Fatalf("chtimes %s: %v", name, err)
 		}
+	}
+}
+
+// TestSweep_ServingABlobKeepsItAlive is the difference between LRU and FIFO.
+// The oldest-downloaded blob is the one being actively requested; eviction
+// must take the blob nobody has asked for instead.
+func TestSweep_ServingABlobKeepsItAlive(t *testing.T) {
+	s := newTestStore(t, Options{MaxBytes: 25})
+	var digests []string
+	for _, body := range []string{"aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"} {
+		d, err := s.Put([]byte(body), "application/octet-stream", body[:1]+".bin")
+		if err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		digests = append(digests, d.SHA256)
+	}
+
+	now := time.Now()
+	for i, d := range digests {
+		backdate(t, s, d, ".bin", now.Add(-time.Duration(3-i)*time.Hour))
+	}
+
+	// Serve the oldest-downloaded blob over the byte route. That is a use,
+	// and it must outrank download order.
+	hot := digests[0]
+	rec := httptest.NewRecorder()
+	serveMux(s).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, RoutePrefix+hot, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("serve hot blob: status %d", rec.Code)
+	}
+
+	if _, err := s.Sweep(time.Now()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if _, err := s.Lookup(hot); err != nil {
+		t.Errorf("the blob being served was evicted: %v", err)
+	}
+	if _, err := s.Lookup(digests[1]); !errors.Is(err, ErrNotFound) {
+		t.Errorf("least-recently-used blob survived: %v", err)
+	}
+}
+
+// TestOpen_DoesNotMoveLastModified pins the reason recency lives on the
+// sidecar rather than the blob: the byte route promises a stable
+// Last-Modified for content-addressed, immutable bytes.
+func TestOpen_DoesNotMoveLastModified(t *testing.T) {
+	s := newTestStore(t, Options{})
+	desc, err := s.Put([]byte("stable"), "text/plain", "s.txt")
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	f, _, first, err := s.Open(desc.SHA256)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = f.Close()
+
+	// Rewind the sidecar far enough that a bug bumping the blob instead
+	// would be unmistakable.
+	stale := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(filepath.Join(s.Dir(), desc.SHA256+".json"), stale, stale); err != nil {
+		t.Fatalf("chtimes sidecar: %v", err)
+	}
+	f, _, second, err := s.Open(desc.SHA256)
+	if err != nil {
+		t.Fatalf("Open again: %v", err)
+	}
+	_ = f.Close()
+
+	if !first.Equal(second) {
+		t.Errorf("Last-Modified moved between reads: %s then %s", first, second)
+	}
+	info, err := os.Stat(filepath.Join(s.Dir(), desc.SHA256+".json"))
+	if err != nil {
+		t.Fatalf("stat sidecar: %v", err)
+	}
+	if !info.ModTime().After(stale) {
+		t.Errorf("Open did not record the read: sidecar mtime still %s", info.ModTime())
 	}
 }
