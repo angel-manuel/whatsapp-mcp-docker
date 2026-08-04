@@ -15,6 +15,9 @@ VOLUME_NAME ?= whatsapp-mcp-data
 TEST_IMAGE_TAG ?= master
 TEST_CONTAINER ?= whatsapp-mcp-test
 TOKEN_FILE     := $(CURDIR)/.auth_token
+# Everything the container exposes lives behind this one endpoint; there is
+# no separate admin port (removed in 99b0ce7).
+MCP_URL        ?= http://localhost:8081/mcp
 
 .PHONY: build test lint vet tidy clean image image-slim run-local run-master stop-master volume-rm pair-qr
 
@@ -54,7 +57,7 @@ image-slim:
 run-local: image
 	docker run --rm -it \
 	  --name whatsapp-mcp-local \
-	  -p 8081:8081 -p 8082:8082 \
+	  -p 8081:8081 \
 	  -v $(VOLUME_NAME):/data \
 	  -e TRANSPORT=$${TRANSPORT:-http} \
 	  -e AUTH_TOKEN=$${AUTH_TOKEN:-devtoken} \
@@ -77,14 +80,14 @@ run-master:
 	docker run -d \
 	  --name $(TEST_CONTAINER) \
 	  --restart unless-stopped \
-	  -p 8081:8081 -p 8082:8082 \
+	  -p 8081:8081 \
 	  -v $(VOLUME_NAME):/data \
 	  -e AUTH_TOKEN=$$(cat $(TOKEN_FILE)) \
 	  $(IMAGE):$(TEST_IMAGE_TAG)
 	@echo
 	@echo "container: $(TEST_CONTAINER)  image: $(IMAGE):$(TEST_IMAGE_TAG)"
 	@echo "MCP HTTP endpoint: http://localhost:8081/mcp"
-	@echo "admin endpoint:    http://localhost:8082"
+	@echo "media byte route:  http://localhost:8081/media/<sha256>"
 	@echo
 	@echo "next:"
 	@echo "  export WHATSAPP_MCP_AUTH_TOKEN=\$$(cat $(TOKEN_FILE))"
@@ -96,29 +99,41 @@ stop-master:
 volume-rm:
 	docker volume rm $(VOLUME_NAME)
 
-# Stream /admin/pair/start and render each rotating pair payload as a QR in
-# the terminal. Requires qrencode (apt: qrencode, brew: qrencode).
+# Drive the pairing_start / pairing_complete MCP tools and render each
+# rotating pair payload as a QR in the terminal. There is no admin HTTP API
+# any more (removed in 99b0ce7) — everything goes through /mcp.
+# Requires qrencode (apt: qrencode, brew: qrencode) and jq.
 pair-qr:
 	@command -v qrencode >/dev/null || { echo "qrencode not found (apt install qrencode)"; exit 1; }
+	@command -v jq >/dev/null || { echo "jq not found (apt install jq)"; exit 1; }
 	@test -s $(TOKEN_FILE) || { echo "$(TOKEN_FILE) missing; run 'make run-master' first"; exit 1; }
 	@token=$$(cat $(TOKEN_FILE)); \
-	curl -sN -H "Authorization: Bearer $$token" -X POST http://localhost:8082/admin/pair/start \
-	| awk -v RS='' -F'\n' '{ \
-	    evt=""; data=""; \
-	    for (i=1;i<=NF;i++) { \
-	      if ($$i ~ /^event: /)      { evt = substr($$i,8) } \
-	      else if ($$i ~ /^data: /)  { data = substr($$i,7) } \
-	    } \
-	    print evt "\t" data; fflush(); \
-	  }' \
-	| while IFS=$$'\t' read -r evt data; do \
-	    case "$$evt" in \
-	      code) \
-	        code=$$(printf '%s' "$$data" | sed -n 's/.*"code":"\([^"]*\)".*/\1/p'); \
-	        clear; printf '\nscan with WhatsApp -> Linked devices -> Link a device\n\n'; \
-	        printf '%s' "$$code" | qrencode -t ANSIUTF8 ;; \
-	      success) echo "paired."; exit 0 ;; \
-	      timeout|error|client-outdated|scanned-without-multidevice) \
-	        echo "pair $$evt: $$data"; exit 1 ;; \
-	    esac; \
-	  done
+	call() { \
+	  curl -s -X POST $(MCP_URL) \
+	    -H "Authorization: Bearer $$token" \
+	    -H "Content-Type: application/json" \
+	    -H "Accept: application/json, text/event-stream" \
+	    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$$1\",\"arguments\":$$2}}" \
+	  | sed -n 's/^data: //p;/^{/p' | tail -n1 \
+	  | jq -r '.result.structuredContent // .error // empty'; \
+	}; \
+	render() { \
+	  code=$$(printf '%s' "$$1" | jq -r '.code // empty'); \
+	  [ -n "$$code" ] || return 0; \
+	  clear; printf '\nscan with WhatsApp -> Linked devices -> Link a device\n\n'; \
+	  printf '%s' "$$code" | qrencode -t ANSIUTF8; \
+	}; \
+	result=$$(call pairing_start '{}'); \
+	[ -n "$$result" ] || { echo "pairing_start returned nothing; is the container up?"; exit 1; }; \
+	render "$$result"; \
+	while :; do \
+	  status=$$(printf '%s' "$$result" | jq -r '.status // "error"'); \
+	  case "$$status" in \
+	    success) echo "paired: $$(printf '%s' "$$result" | jq -r '.jid // ""')"; exit 0 ;; \
+	    timeout|error|not_pairing|client_outdated|scanned_without_multidevice) \
+	      echo "pair $$status: $$result"; exit 1 ;; \
+	  esac; \
+	  result=$$(call pairing_complete '{"wait_seconds":60}'); \
+	  [ -n "$$result" ] || { echo "pairing_complete returned nothing"; exit 1; }; \
+	  render "$$result"; \
+	done

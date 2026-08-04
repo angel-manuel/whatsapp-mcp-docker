@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ContactRow is the read-side projection of a single contact, merged with
@@ -183,6 +184,86 @@ func (s *Store) GetChatNameByJID(ctx context.Context, jid string) (string, error
 		return "", fmt.Errorf("cache: get chat %s: %w", jid, err)
 	}
 	return name, nil
+}
+
+// MediaRow is the read-side projection of the media columns on a message
+// row: everything needed to re-request the CDN object plus what to call the
+// resulting file. Non-media messages yield a row with Kind text/other and a
+// nil Key — see HasMedia.
+type MediaRow struct {
+	ChatJID  string
+	ID       string
+	Kind     MessageKind
+	Mime     string
+	Filename string
+	// URL is the absolute CDN URL captured at ingest. It expires; DirectPath
+	// is the durable locator and should be preferred when non-empty.
+	URL string
+	// DirectPath is empty for rows ingested before the
+	// 004_media_direct_path migration. Those can only be downloaded through
+	// URL, and only until it expires.
+	DirectPath string
+	Key        []byte
+	SHA256     []byte
+	EncSHA256  []byte
+	Length     uint64
+	// Timestamp is the message time, used to synthesise a stable download
+	// filename for the kinds that carry none (everything but documents).
+	Timestamp time.Time
+}
+
+// HasMedia reports whether the row carries a downloadable attachment. A
+// media kind without a media key is not downloadable (the payload is
+// encrypted with it), so both are required.
+func (m MediaRow) HasMedia() bool {
+	switch m.Kind {
+	case KindImage, KindVideo, KindAudio, KindDocument, KindSticker:
+		return len(m.Key) > 0
+	default:
+		return false
+	}
+}
+
+// GetMessageMedia returns the media locator for the message identified by
+// (chatJID, id). Returns sql.ErrNoRows when no such message is cached; a
+// message that exists but carries no attachment is returned with HasMedia
+// false so callers can tell the two cases apart.
+func (s *Store) GetMessageMedia(ctx context.Context, chatJID, id string) (MediaRow, error) {
+	if chatJID == "" || id == "" {
+		return MediaRow{}, errors.New("cache: GetMessageMedia: chatJID and id required")
+	}
+	var (
+		out    MediaRow
+		kind   string
+		length int64
+		ts     int64
+	)
+	err := s.db.QueryRowContext(ctx, `
+SELECT chat_jid, id, kind, ts, media_mime, media_filename, media_url, media_direct_path,
+       media_key, media_sha256, media_enc_sha256, media_length
+  FROM messages
+ WHERE chat_jid = ? AND id = ?
+ LIMIT 1
+`, chatJID, id).Scan(
+		&out.ChatJID, &out.ID, &kind, &ts, &out.Mime, &out.Filename, &out.URL, &out.DirectPath,
+		&out.Key, &out.SHA256, &out.EncSHA256, &length,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return MediaRow{}, sql.ErrNoRows
+		}
+		return MediaRow{}, fmt.Errorf("cache: get message media %s/%s: %w", chatJID, id, err)
+	}
+	out.Kind = MessageKind(kind)
+	// A row with no recorded ts keeps the zero time.Time rather than
+	// becoming 1970-01-01, so callers can tell "unknown" from "epoch".
+	if ts > 0 {
+		out.Timestamp = time.Unix(ts, 0).UTC()
+	}
+	if length > 0 {
+		out.Length = uint64(length)
+	}
+	return out, nil
 }
 
 // ResolveLinkedJIDs returns jid together with every other identity linked to

@@ -209,14 +209,16 @@ func (s *Store) InsertMessage(ctx context.Context, m Message) error {
 INSERT INTO messages (
     chat_jid, id, sender_jid, sender_push_name, ts, kind, body, reply_to_id,
     is_from_me,
-    media_mime, media_filename, media_url, media_key, media_sha256, media_enc_sha256, media_length
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    media_mime, media_filename, media_url, media_direct_path, media_key, media_sha256,
+    media_enc_sha256, media_length
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chat_jid, id) DO NOTHING
 `,
 		m.ChatJID, m.ID, m.SenderJID, m.SenderPushName, unixSeconds(m.Timestamp),
 		string(kind), m.Body, m.ReplyToID,
 		boolToInt(m.IsFromMe),
-		media.Mime, media.Filename, media.URL, media.Key, media.SHA256, media.EncSHA256, media.Length,
+		media.Mime, media.Filename, media.URL, media.DirectPath, media.Key, media.SHA256,
+		media.EncSHA256, media.Length,
 	)
 	if err != nil {
 		return fmt.Errorf("cache: insert message %s/%s: %w", m.ChatJID, m.ID, err)

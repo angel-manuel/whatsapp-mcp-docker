@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -149,6 +151,7 @@ func TestHandleEvent_ImageMessage_StoresMediaMetadataAndCaption(t *testing.T) {
 		Message: &waE2E.Message{
 			ImageMessage: &waE2E.ImageMessage{
 				URL:           proto.String("https://mmg.whatsapp.net/x"),
+				DirectPath:    proto.String("/v/t62.7118-24/img"),
 				Mimetype:      proto.String("image/jpeg"),
 				Caption:       proto.String("a cat"),
 				MediaKey:      []byte{0x01, 0x02},
@@ -160,11 +163,11 @@ func TestHandleEvent_ImageMessage_StoresMediaMetadataAndCaption(t *testing.T) {
 	}
 	ingest.HandleEvent(evt)
 
-	var kind, body, mime, url string
+	var kind, body, mime, url, directPath string
 	var length int64
 	if err := store.DB().QueryRowContext(context.Background(),
-		`SELECT kind, body, media_mime, media_url, media_length FROM messages WHERE chat_jid = ? AND id = ?`,
-		chat.String(), "wamid.IMG1").Scan(&kind, &body, &mime, &url, &length); err != nil {
+		`SELECT kind, body, media_mime, media_url, media_direct_path, media_length FROM messages WHERE chat_jid = ? AND id = ?`,
+		chat.String(), "wamid.IMG1").Scan(&kind, &body, &mime, &url, &directPath, &length); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if kind != string(KindImage) {
@@ -175,6 +178,168 @@ func TestHandleEvent_ImageMessage_StoresMediaMetadataAndCaption(t *testing.T) {
 	}
 	if mime != "image/jpeg" || url != "https://mmg.whatsapp.net/x" || length != 4321 {
 		t.Fatalf("media metadata mismatch: mime=%q url=%q len=%d", mime, url, length)
+	}
+	if directPath != "/v/t62.7118-24/img" {
+		t.Fatalf("media_direct_path = %q", directPath)
+	}
+}
+
+// TestHandleEvent_MediaKinds_CaptureDirectPath pins the locator capture for
+// every media kind. The direct path is the only durable one — media_url
+// expires and cannot be refreshed — and it exists solely on the live
+// protobuf, so a kind missing from extractEnvelope can never be repaired
+// after the fact. That makes per-kind coverage worth the table.
+func TestHandleEvent_MediaKinds_CaptureDirectPath(t *testing.T) {
+	const (
+		wantURL  = "https://mmg.whatsapp.net/blob"
+		wantPath = "/v/t62.7118-24/blob"
+	)
+	key := []byte{0x01, 0x02, 0x03}
+	fileSHA := []byte{0xaa, 0xbb}
+	encSHA := []byte{0xcc, 0xdd}
+
+	cases := []struct {
+		name     string
+		id       string
+		msg      *waE2E.Message
+		wantKind MessageKind
+		wantMime string
+		wantName string
+	}{
+		{
+			name: "image", id: "wamid.M-IMG", wantKind: KindImage, wantMime: "image/jpeg",
+			msg: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+				URL: proto.String(wantURL), DirectPath: proto.String(wantPath),
+				Mimetype: proto.String("image/jpeg"), MediaKey: key,
+				FileSHA256: fileSHA, FileEncSHA256: encSHA, FileLength: proto.Uint64(11),
+			}},
+		},
+		{
+			name: "video", id: "wamid.M-VID", wantKind: KindVideo, wantMime: "video/mp4",
+			msg: &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+				URL: proto.String(wantURL), DirectPath: proto.String(wantPath),
+				Mimetype: proto.String("video/mp4"), MediaKey: key,
+				FileSHA256: fileSHA, FileEncSHA256: encSHA, FileLength: proto.Uint64(22),
+			}},
+		},
+		{
+			name: "audio", id: "wamid.M-AUD", wantKind: KindAudio, wantMime: "audio/ogg; codecs=opus",
+			msg: &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+				URL: proto.String(wantURL), DirectPath: proto.String(wantPath),
+				Mimetype: proto.String("audio/ogg; codecs=opus"), MediaKey: key,
+				FileSHA256: fileSHA, FileEncSHA256: encSHA, FileLength: proto.Uint64(33),
+			}},
+		},
+		{
+			name: "document", id: "wamid.M-DOC", wantKind: KindDocument, wantMime: "application/pdf",
+			wantName: "invoice.pdf",
+			msg: &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+				URL: proto.String(wantURL), DirectPath: proto.String(wantPath),
+				Mimetype: proto.String("application/pdf"), FileName: proto.String("invoice.pdf"),
+				MediaKey: key, FileSHA256: fileSHA, FileEncSHA256: encSHA, FileLength: proto.Uint64(44),
+			}},
+		},
+		{
+			name: "sticker", id: "wamid.M-STK", wantKind: KindSticker, wantMime: "image/webp",
+			msg: &waE2E.Message{StickerMessage: &waE2E.StickerMessage{
+				URL: proto.String(wantURL), DirectPath: proto.String(wantPath),
+				Mimetype: proto.String("image/webp"), MediaKey: key,
+				FileSHA256: fileSHA, FileEncSHA256: encSHA, FileLength: proto.Uint64(55),
+			}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ingest, store := newTestIngestor(t)
+			chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+			ingest.HandleEvent(&events.Message{
+				Info: types.MessageInfo{
+					MessageSource: types.MessageSource{Chat: chat, Sender: chat},
+					ID:            tc.id,
+					Timestamp:     time.Unix(1_700_000_400, 0).UTC(),
+				},
+				Message: tc.msg,
+			})
+
+			row, err := store.GetMessageMedia(context.Background(), chat.String(), tc.id)
+			if err != nil {
+				t.Fatalf("GetMessageMedia: %v", err)
+			}
+			if row.Kind != tc.wantKind {
+				t.Errorf("kind = %q, want %q", row.Kind, tc.wantKind)
+			}
+			if row.DirectPath != wantPath {
+				t.Errorf("DirectPath = %q, want %q", row.DirectPath, wantPath)
+			}
+			if row.URL != wantURL {
+				t.Errorf("URL = %q, want %q", row.URL, wantURL)
+			}
+			if row.Mime != tc.wantMime {
+				t.Errorf("Mime = %q, want %q", row.Mime, tc.wantMime)
+			}
+			if row.Filename != tc.wantName {
+				t.Errorf("Filename = %q, want %q", row.Filename, tc.wantName)
+			}
+			if !row.HasMedia() {
+				t.Errorf("HasMedia() = false, want true")
+			}
+		})
+	}
+}
+
+// TestGetMessageMedia_TextMessageHasNoMedia keeps the "no attachment" case
+// distinguishable from "message not cached": download_media reports them
+// with different error codes.
+func TestGetMessageMedia_TextMessageHasNoMedia(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	ingest.HandleEvent(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: chat},
+			ID:            "wamid.TXT",
+			Timestamp:     time.Unix(1_700_000_500, 0).UTC(),
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello")},
+	})
+
+	row, err := store.GetMessageMedia(context.Background(), chat.String(), "wamid.TXT")
+	if err != nil {
+		t.Fatalf("GetMessageMedia: %v", err)
+	}
+	if row.HasMedia() {
+		t.Fatalf("HasMedia() = true for a text message")
+	}
+	if row.Kind != KindText {
+		t.Fatalf("kind = %q, want %q", row.Kind, KindText)
+	}
+
+	if _, err := store.GetMessageMedia(context.Background(), chat.String(), "wamid.MISSING"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing message: err = %v, want sql.ErrNoRows", err)
+	}
+}
+
+// TestGetMessageMedia_MissingTimestampStaysZero keeps "unknown time"
+// distinguishable from "the epoch". download_media synthesises a filename
+// from this timestamp and needs to fall back when it was never recorded;
+// silently returning 1970-01-01 would make that fallback unreachable.
+func TestGetMessageMedia_MissingTimestampStaysZero(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	chat := "1234567890@s.whatsapp.net"
+	if err := store.InsertMessage(ctx, Message{
+		ID: "wamid.NOTS", ChatJID: chat, SenderJID: chat, Kind: KindImage,
+		Media: &Media{Mime: "image/jpeg", Key: []byte{0x01}, DirectPath: "/v/x"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	row, err := store.GetMessageMedia(ctx, chat, "wamid.NOTS")
+	if err != nil {
+		t.Fatalf("GetMessageMedia: %v", err)
+	}
+	if !row.Timestamp.IsZero() {
+		t.Fatalf("Timestamp = %s, want the zero time", row.Timestamp)
 	}
 }
 

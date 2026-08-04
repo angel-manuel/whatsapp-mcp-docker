@@ -44,6 +44,15 @@ type Config struct {
 	// Name and Version identify the server in MCP initialize responses.
 	Name    string
 	Version string
+	// Routes are additional HTTP handlers mounted on the same mux as
+	// /mcp, keyed by http.ServeMux pattern. They share the listener, the
+	// port and the bearer-auth middleware — there is deliberately no
+	// second auth system and no second port.
+	//
+	// This exists for the one thing MCP structurally cannot do: transfer
+	// bytes. GET /media/{sha256} is the only current user. Anything that
+	// can be a tool stays a tool.
+	Routes map[string]http.Handler
 }
 
 // Server is a transport-agnostic MCP server wrapping mcp-go. It holds
@@ -171,11 +180,22 @@ func (s *Server) HTTPHandler() http.Handler {
 }
 
 // newHTTPMux builds the HTTP routing surface shared by Run and HTTPHandler:
-// the bearer-authenticated MCP endpoint at /mcp plus an unauthenticated
-// /healthz liveness probe used by the container HEALTHCHECK.
+// the bearer-authenticated MCP endpoint at /mcp, every Config.Routes entry
+// behind that same gate, and an unauthenticated /healthz liveness probe used
+// by the container HEALTHCHECK.
+//
+// /healthz is the sole exception to the bearer gate, and only because it
+// exposes nothing but a 200. Config.Routes entries carry data and are always
+// authenticated.
 func (s *Server) newHTTPMux(streamable http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", bearerAuth(s.cfg.AuthToken, streamable))
+	for pattern, h := range s.cfg.Routes {
+		if h == nil {
+			continue
+		}
+		mux.Handle(pattern, bearerAuth(s.cfg.AuthToken, h))
+	}
 	mux.HandleFunc("/healthz", handleHealthz)
 	return mux
 }

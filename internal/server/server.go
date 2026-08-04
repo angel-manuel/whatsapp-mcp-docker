@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
@@ -14,6 +15,7 @@ import (
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcptools"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/media"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/tools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
@@ -21,6 +23,11 @@ import (
 // shutdownTimeout bounds how long we wait for the MCP goroutine to exit after
 // context cancellation so we don't block indefinitely on a slow consumer.
 const shutdownTimeout = 10 * time.Second
+
+// sweeperDrainTimeout bounds how long shutdown waits for the media
+// retention loop. It only ever blocks on a ticker, so this is a backstop
+// rather than a budget.
+const sweeperDrainTimeout = 2 * time.Second
 
 // Version is baked into the MCP server identity. main overrides this via
 // ldflags at build time.
@@ -85,7 +92,19 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	mcpSrv, err := s.buildMCP(waCli, cacheStore)
+	// Media blobs downloaded by download_media and served by the
+	// GET /media/{sha256} byte route. Opened before the MCP server so its
+	// handler can be mounted on the same mux, behind the same bearer auth.
+	mediaStore, err := media.Open(s.cfg.MediaDir(), media.Options{
+		MaxBytes: s.cfg.MediaMaxBytes,
+		TTL:      s.cfg.MediaTTL,
+		Logger:   s.log,
+	})
+	if err != nil {
+		return fmt.Errorf("media open: %w", err)
+	}
+
+	mcpSrv, err := s.buildMCP(waCli, cacheStore, mediaStore)
 	if err != nil {
 		return fmt.Errorf("build mcp server: %w", err)
 	}
@@ -94,12 +113,22 @@ func (s *Server) Run(ctx context.Context) error {
 		WA:       waCli,
 		Ingestor: ingestor,
 		Sync:     syncOrch,
+		Media:    mediaStore,
 	}); err != nil {
 		return fmt.Errorf("register tools: %w", err)
 	}
 
 	mcpCtx, mcpCancel := context.WithCancel(ctx)
 	defer mcpCancel()
+
+	// Media retention: one pass now (the container may have been down for
+	// longer than MEDIA_TTL, and expired bytes must not stay readable),
+	// then every MEDIA_SWEEP_INTERVAL until shutdown.
+	sweeperDone := make(chan struct{})
+	go func() {
+		defer close(sweeperDone)
+		mediaStore.RunSweeper(mcpCtx, s.cfg.MediaSweepInterval)
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -130,6 +159,17 @@ func (s *Server) Run(ctx context.Context) error {
 		applog.WithEvent(s.log, "server.stop").Warn("mcp goroutine drain timed out")
 	}
 
+	// The sweeper only ever waits on a ticker, so it exits promptly once
+	// mcpCtx is cancelled. Bound the wait anyway, and keep it short: a
+	// stuck retention pass must not hold up process exit.
+	sweeperDrain := time.NewTimer(sweeperDrainTimeout)
+	defer sweeperDrain.Stop()
+	select {
+	case <-sweeperDone:
+	case <-sweeperDrain.C:
+		applog.WithEvent(s.log, "server.stop").Warn("media sweeper drain timed out")
+	}
+
 	applog.WithEvent(s.log, "server.stop").Info("server stopping")
 	return runErr
 }
@@ -138,7 +178,7 @@ func (s *Server) Run(ctx context.Context) error {
 // whatsmeow client (tools fail with not_paired until the device is both
 // paired AND logged in), and registers the read-side cache-backed tools
 // against its registry.
-func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store) (*mcp.Server, error) {
+func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store, mediaStore *media.Store) (*mcp.Server, error) {
 	pairing := mcp.PairingStateFunc(func() bool {
 		st := waCli.Status()
 		return st.LoggedIn
@@ -147,6 +187,13 @@ func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store) (*mcp.Serve
 	if err := mcptools.Register(reg, cacheStore); err != nil {
 		return nil, fmt.Errorf("register cache tools: %w", err)
 	}
+	// The media byte route rides the MCP listener: same port, same
+	// AUTH_TOKEN, same bearer middleware. It exists for the one thing MCP
+	// cannot do — transfer bytes — and deliberately does not reopen the
+	// :8082 admin API removed in 99b0ce7.
+	routes := map[string]http.Handler{
+		media.RoutePrefix + "{sha256}": mediaStore.Handler(),
+	}
 	return mcp.New(mcp.Config{
 		Transport: mcp.TransportMode(s.cfg.Transport),
 		BindAddr:  s.cfg.BindAddr,
@@ -154,5 +201,6 @@ func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store) (*mcp.Serve
 		AuthToken: s.cfg.AuthToken,
 		Name:      "whatsapp-mcp",
 		Version:   Version,
+		Routes:    routes,
 	}, s.log, reg, pairing)
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/media"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/tools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
@@ -114,6 +116,10 @@ func (m *mockWA) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message
 
 func (m *mockWA) OwnJID() types.JID { return m.ownJID }
 
+// Whatsmeow returns nil: no test in this file downloads media, and
+// download_media resolves its downloader through Deps.Downloader instead.
+func (m *mockWA) Whatsmeow() *whatsmeow.Client { return nil }
+
 // Pairing surface — these tests focus on cache/messaging tools and never
 // drive pairing; the methods return inert defaults so the mock still
 // satisfies tools.WAClient. The pairing-specific tests live in
@@ -170,12 +176,21 @@ type testHarness struct {
 	store    *cache.Store
 	ingestor *cache.Ingestor
 	sync     *cache.SyncOrchestrator
+	media    *media.Store
 }
 
 // newHarness constructs an mcp.Server with the tools package registered,
 // a fresh in-memory cache store, and a mock wa client. It wires a stdio
 // client at the other end so tests can drive the real MCP protocol.
 func newHarness(t *testing.T, paired bool, seed func(*cache.Store), mock *mockWA) *testHarness {
+	t.Helper()
+	return newHarnessWithDeps(t, paired, seed, mock, nil)
+}
+
+// newHarnessWithDeps is newHarness plus a hook to adjust the tools.Deps
+// before registration — used by the download_media tests to inject a fake
+// MediaDownloader in place of a live whatsmeow media connection.
+func newHarnessWithDeps(t *testing.T, paired bool, seed func(*cache.Store), mock *mockWA, tweak func(*tools.Deps)) *testHarness {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -216,7 +231,18 @@ func newHarness(t *testing.T, paired bool, seed func(*cache.Store), mock *mockWA
 	}
 	ingestor := cache.NewIngestor(store, nil)
 	syncOrch := cache.NewSyncOrchestrator(store, ingestor, nil)
-	if err := tools.Register(srv.Registry(), tools.Deps{Cache: store, WA: mock, Ingestor: ingestor, Sync: syncOrch}); err != nil {
+	mediaStore, err := media.Open(filepath.Join(t.TempDir(), "media"), media.Options{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		cancel()
+		t.Fatalf("media.Open: %v", err)
+	}
+	deps := tools.Deps{Cache: store, WA: mock, Ingestor: ingestor, Sync: syncOrch, Media: mediaStore}
+	if tweak != nil {
+		tweak(&deps)
+	}
+	if err := tools.Register(srv.Registry(), deps); err != nil {
 		cancel()
 		t.Fatalf("tools.Register: %v", err)
 	}
@@ -260,7 +286,7 @@ func newHarness(t *testing.T, paired bool, seed func(*cache.Store), mock *mockWA
 		_ = store.Close()
 	})
 
-	return &testHarness{client: client, cancel: cancel, mock: mock, store: store, ingestor: ingestor, sync: syncOrch}
+	return &testHarness{client: client, cancel: cancel, mock: mock, store: store, ingestor: ingestor, sync: syncOrch, media: mediaStore}
 }
 
 func callTool(t *testing.T, h *testHarness, name string, args map[string]any) *mcpgo.CallToolResult {

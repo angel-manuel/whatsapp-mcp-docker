@@ -50,6 +50,15 @@ const (
 	// ErrNotPairing indicates the caller asked to drive an in-progress
 	// pair flow but no such flow is active. Mirrors wa.ErrNotPairing.
 	ErrNotPairing ErrorCode = "not_pairing"
+	// ErrNoMedia indicates download_media was called on a message that
+	// carries no attachment. Retrying will never help; the caller picked
+	// the wrong message.
+	ErrNoMedia ErrorCode = "no_media"
+	// ErrMediaUnavailable indicates the attachment exists but its bytes
+	// could not be fetched — an expired locator or a CDN failure. Unlike
+	// ErrNoMedia this is potentially recoverable, typically by re-ingesting
+	// the message with cache_sync.
+	ErrMediaUnavailable ErrorCode = "media_unavailable"
 )
 
 // NotPairedMessage is the stable message returned alongside ErrNotPaired.
@@ -233,6 +242,18 @@ func PairInProgressError(message string) *mcpgo.CallToolResult {
 // callers of pairing_complete (and PairPhone via pairing_start).
 func NotPairingError(message string) *mcpgo.CallToolResult {
 	return ErrorResult(ErrNotPairing, message)
+}
+
+// NoMediaError is the canonical "this message has no attachment" error for
+// download_media.
+func NoMediaError(message string) *mcpgo.CallToolResult {
+	return ErrorResult(ErrNoMedia, message)
+}
+
+// MediaUnavailableError is the canonical "attachment exists but its bytes
+// could not be fetched" error for download_media.
+func MediaUnavailableError(message string) *mcpgo.CallToolResult {
+	return ErrorResult(ErrMediaUnavailable, message)
 }
 
 // pairingMiddleware short-circuits every tool call with a structured

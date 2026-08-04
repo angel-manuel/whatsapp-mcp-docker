@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // allVars lists every env var the loader reads. Each test clears them before
@@ -12,6 +13,7 @@ var allVars = []string{
 	"LOG_LEVEL", "LOG_FORMAT", "AUTH_TOKEN",
 	"MTLS_CA_FILE", "MTLS_CERT_FILE", "MTLS_KEY_FILE",
 	"WHATSAPP_DEVICE_NAME", "FFMPEG_PATH", "ENABLE_PPROF",
+	"MEDIA_MAX_BYTES", "MEDIA_TTL", "MEDIA_SWEEP_INTERVAL",
 }
 
 func clearEnv(t *testing.T) {
@@ -247,5 +249,98 @@ func TestLoad_EmptyDataDir(t *testing.T) {
 	}
 	if cfg.DataDir != "/data" {
 		t.Errorf("DataDir = %q, want /data (default)", cfg.DataDir)
+	}
+}
+
+func TestLoad_MediaRetentionDefaults(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("TRANSPORT", "stdio")
+	t.Setenv("DATA_DIR", "/data")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// The media store is a re-downloadable cache, so it ships capped
+	// rather than growing until the volume fills.
+	if cfg.MediaMaxBytes != DefaultMediaMaxBytes {
+		t.Errorf("MediaMaxBytes = %d, want %d", cfg.MediaMaxBytes, DefaultMediaMaxBytes)
+	}
+	// Age-based eviction is opt-in: deleting media a user can still see in
+	// their chat history should be a deliberate choice.
+	if cfg.MediaTTL != 0 {
+		t.Errorf("MediaTTL = %s, want 0 (disabled)", cfg.MediaTTL)
+	}
+	if cfg.MediaSweepInterval != time.Hour {
+		t.Errorf("MediaSweepInterval = %s, want 1h", cfg.MediaSweepInterval)
+	}
+	if got := cfg.MediaDir(); got != "/data/media" {
+		t.Errorf("MediaDir() = %q, want /data/media", got)
+	}
+}
+
+func TestLoad_MediaRetentionOverrides(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("TRANSPORT", "stdio")
+	t.Setenv("DATA_DIR", "/srv/wa")
+	t.Setenv("MEDIA_MAX_BYTES", "5368709120")
+	t.Setenv("MEDIA_TTL", "168h")
+	t.Setenv("MEDIA_SWEEP_INTERVAL", "15m")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MediaMaxBytes != 5368709120 {
+		t.Errorf("MediaMaxBytes = %d", cfg.MediaMaxBytes)
+	}
+	if cfg.MediaTTL != 168*time.Hour {
+		t.Errorf("MediaTTL = %s", cfg.MediaTTL)
+	}
+	if cfg.MediaSweepInterval != 15*time.Minute {
+		t.Errorf("MediaSweepInterval = %s", cfg.MediaSweepInterval)
+	}
+	if got := cfg.MediaDir(); got != "/srv/wa/media" {
+		t.Errorf("MediaDir() = %q", got)
+	}
+}
+
+func TestLoad_MediaRetentionRejectsBadValues(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"unparseable size", map[string]string{"MEDIA_MAX_BYTES": "1GB"}},
+		{"negative size", map[string]string{"MEDIA_MAX_BYTES": "-1"}},
+		{"unparseable ttl", map[string]string{"MEDIA_TTL": "7 days"}},
+		{"negative ttl", map[string]string{"MEDIA_TTL": "-1h"}},
+		{"negative interval", map[string]string{"MEDIA_SWEEP_INTERVAL": "-5m"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("TRANSPORT", "stdio")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatal("Load succeeded, want an error")
+			}
+		})
+	}
+}
+
+// MEDIA_MAX_BYTES=0 is the documented way to disable the cap entirely.
+func TestLoad_MediaMaxBytesZeroIsUnlimited(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("TRANSPORT", "stdio")
+	t.Setenv("MEDIA_MAX_BYTES", "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MediaMaxBytes != 0 {
+		t.Errorf("MediaMaxBytes = %d, want 0", cfg.MediaMaxBytes)
 	}
 }

@@ -74,6 +74,12 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			Handler:     cacheSyncStatus(deps),
 		},
 		{
+			Name:        "download_media",
+			Description: "Download the attachment of a WhatsApp message (image, video, audio, document, sticker) and return a descriptor pointing at it. Returns JSON only — never bytes and never base64; fetch `media_path` over HTTP with the same bearer token used for /mcp.",
+			InputSchema: downloadMediaSchema,
+			Handler:     downloadMedia(deps),
+		},
+		{
 			Name:        "cache_sync",
 			Description: "Trigger reconciliation of the local cache against authoritative whatsmeow endpoints (joined groups, subscribed newsletters, app state). Returns immediately with a sync_id; per-stage progress is reported by cache_sync_status.",
 			InputSchema: cacheSyncSchema,

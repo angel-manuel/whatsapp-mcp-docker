@@ -93,13 +93,18 @@ const (
 // downloaded lazily by the download_media tool; we keep only enough to
 // re-request the CDN object.
 type Media struct {
-	Mime      string
-	Filename  string
-	URL       string
-	Key       []byte
-	SHA256    []byte
-	EncSHA256 []byte
-	Length    uint64
+	Mime     string
+	Filename string
+	URL      string
+	// DirectPath is the CDN-relative path used by whatsmeow's
+	// DownloadMediaWithPath. It outlives URL, which goes stale — prefer it
+	// whenever it is non-empty. Only present on rows ingested after the
+	// 004_media_direct_path migration; older rows have to fall back to URL.
+	DirectPath string
+	Key        []byte
+	SHA256     []byte
+	EncSHA256  []byte
+	Length     uint64
 }
 
 // Message mirrors the messages table row used by upserts.
