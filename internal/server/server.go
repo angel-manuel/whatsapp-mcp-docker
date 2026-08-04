@@ -140,23 +140,31 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 
 	var runErr error
+	// Tracks whether the select below already took the MCP goroutine's result.
+	// errCh carries exactly one value, so draining again would block for the
+	// full shutdownTimeout — which is what happens whenever the transport
+	// exits on its own (stdio client disconnects, stdin at EOF).
+	mcpExited := false
 	select {
 	case <-ctx.Done():
 	case err := <-errCh:
 		runErr = err
+		mcpExited = true
 	}
 	mcpCancel()
 
 	// Wait for the MCP goroutine to exit so callers observe a clean shutdown.
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer drainCancel()
-	select {
-	case err := <-errCh:
-		if runErr == nil && err != nil {
-			runErr = err
+	if !mcpExited {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer drainCancel()
+		select {
+		case err := <-errCh:
+			if runErr == nil && err != nil {
+				runErr = err
+			}
+		case <-drainCtx.Done():
+			applog.WithEvent(s.log, "server.stop").Warn("mcp goroutine drain timed out")
 		}
-	case <-drainCtx.Done():
-		applog.WithEvent(s.log, "server.stop").Warn("mcp goroutine drain timed out")
 	}
 
 	// The sweeper only ever waits on a ticker, so it exits promptly once
