@@ -78,11 +78,11 @@ export the variable in the shell that launches Claude Code.
 
 | Var | Default | Notes |
 |---|---|---|
-| `TRANSPORT` | `http` | `http` or `stdio`. HTTP **requires** `AUTH_TOKEN` or the full `MTLS_*` trio. |
+| `TRANSPORT` | `http` | `http` or `stdio`. HTTP **requires** `AUTH_TOKEN`. |
 | `PORT` | `8081` | Serves `/mcp` **and** `/media/<sha256>`. |
 | `DATA_DIR` | `/data` | Persistent state directory (`session.db`, `cache.db`, `media/`). |
 | `AUTH_TOKEN` | *(unset)* | Bearer token required on every HTTP request (`/mcp` and `/media/`). |
-| `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | If all three set, client mTLS replaces `AUTH_TOKEN`. |
+| `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them is a fatal startup error — there is no TLS listener. Terminate TLS in a reverse proxy. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
 | `LOG_FORMAT` | `json` | `json` or `text`. |
@@ -90,9 +90,12 @@ export the variable in the shell that launches Claude Code.
 | `MEDIA_TTL` | *(unset)* | Go duration (e.g. `168h`); evicts older media. Unset = disabled. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period; also runs at startup. |
 
-In production, deliver `AUTH_TOKEN` and `MTLS_*` as tmpfs-mounted files
-referenced by path, not via `-e` — `-e` exposes the secret to anyone
-who can read `/proc/<pid>/environ`.
+In production, deliver `AUTH_TOKEN` as a tmpfs-mounted file referenced by
+path, not via `-e` — `-e` exposes the secret to anyone who can read
+`/proc/<pid>/environ`.
+
+The server speaks plaintext HTTP. Anything needing transport encryption or
+client-certificate auth must front it with a reverse proxy.
 
 ## Tools
 

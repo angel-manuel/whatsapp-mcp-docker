@@ -156,7 +156,7 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
 | `AUTH_TOKEN` | *(unset)* | Required bearer token for every HTTP route (`/mcp` and `/media/`). REQUIRED in `http` mode. |
-| `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | If all three are set, requires client mTLS and ignores `AUTH_TOKEN`. |
+| `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them in `http` mode is a fatal startup error. No TLS listener exists, so they never encrypted anything or verified a client certificate. If mTLS is ever built, it will be additive to `AUTH_TOKEN`, never a replacement. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Shown on the user's phone after pairing. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Used by `send_audio_message`; absent → audio conversion disabled, Opus input required. |
 | `ENABLE_PPROF` | `false` | Exposes `/debug/pprof` when true. |
@@ -164,7 +164,7 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 | `MEDIA_TTL` | *(unset)* | Go duration; evicts media older than this. Unset/`0` disables age-based eviction. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period. A sweep also runs at startup. |
 
-No long-lived secrets in env vars in production: operators should deliver `AUTH_TOKEN`, `MTLS_*` via a secret store mount (tmpfs file + `file://` reference) rather than `-e`.
+No long-lived secrets in env vars in production: operators should deliver `AUTH_TOKEN` via a secret store mount (tmpfs file + `file://` reference) rather than `-e`.
 
 ## Security posture
 
@@ -174,7 +174,8 @@ No long-lived secrets in env vars in production: operators should deliver `AUTH_
 - **Minimal base image.** Distroless static or `debian:bookworm-slim` — decision documented in `docs/image.md`. No shell in the distroless variant.
 - **Signed images.** Releases pushed to `ghcr.io/angel-manuel/whatsapp-mcp-docker` and signed with [`cosign`](https://github.com/sigstore/cosign). Consumers pin by digest.
 - **Reproducible-ish builds.** `go build -trimpath -buildvcs=false` + pinned base image digests; goal is byte-identical rebuilds from the same commit.
-- **Mandatory auth on HTTP.** Starting in `http` mode without `AUTH_TOKEN` (or mTLS config) is a fatal error at startup.
+- **Mandatory auth on HTTP.** Starting in `http` mode without `AUTH_TOKEN` is a fatal error at startup. The bearer check rejects every request when the configured token is empty, rather than accepting an empty one.
+- **TLS terminates upstream.** The listener is plaintext HTTP; the bearer token is the only auth this process enforces. Operators needing transport encryption or client-certificate auth must front it with a reverse proxy. Config that claims otherwise fails closed at startup rather than serving plaintext under an mTLS-shaped name.
 - **Outbound egress.** The process only needs to reach WhatsApp endpoints; operators running under a strict egress policy should allow at minimum:
   - `*.whatsapp.net`
   - `web.whatsapp.com`

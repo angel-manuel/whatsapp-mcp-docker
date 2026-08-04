@@ -105,8 +105,8 @@ func Load() (*Config, error) {
 }
 
 // Validate enforces invariants that cannot be expressed in the field types.
-// In particular: HTTP transport requires either AUTH_TOKEN or the full
-// MTLS_CA_FILE/MTLS_CERT_FILE/MTLS_KEY_FILE trio.
+// In particular: HTTP transport requires AUTH_TOKEN, and rejects the MTLS_*
+// vars outright because no TLS listener exists to honour them.
 func (c *Config) Validate() error {
 	switch c.Transport {
 	case TransportHTTP, TransportStdio:
@@ -151,21 +151,44 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// MTLSEnabled reports whether all three MTLS_* vars are set.
-func (c *Config) MTLSEnabled() bool {
-	return c.MTLSCAFile != "" && c.MTLSCertFile != "" && c.MTLSKeyFile != ""
+// mtlsVarsSet names whichever MTLS_* vars carry a value. The vars are still
+// read from the environment purely so they can be rejected by name: silently
+// ignoring an operator's mTLS config would recreate the false sense of
+// security this check exists to remove.
+func (c *Config) mtlsVarsSet() []string {
+	var set []string
+	for _, v := range []struct {
+		name, value string
+	}{
+		{"MTLS_CA_FILE", c.MTLSCAFile},
+		{"MTLS_CERT_FILE", c.MTLSCertFile},
+		{"MTLS_KEY_FILE", c.MTLSKeyFile},
+	} {
+		if v.value != "" {
+			set = append(set, v.name)
+		}
+	}
+	return set
 }
 
+// validateHTTPAuth rejects the two configurations that used to look like
+// stronger auth than AUTH_TOKEN and were in fact weaker.
+//
+// mTLS is checked first, and fatally: nothing in this binary builds a
+// tls.Config or calls ServeTLS, so setting the trio previously either killed
+// startup deep in the MCP layer (trio alone) or — worse — brought up a
+// plaintext listener with no client-certificate check while the operator
+// believed they had mutual TLS (trio plus AUTH_TOKEN). Failing here, by name,
+// is the only honest answer until a TLS listener exists.
 func (c *Config) validateHTTPAuth() error {
-	anyMTLS := c.MTLSCAFile != "" || c.MTLSCertFile != "" || c.MTLSKeyFile != ""
-	if anyMTLS && !c.MTLSEnabled() {
-		return errors.New("MTLS_CA_FILE, MTLS_CERT_FILE and MTLS_KEY_FILE must all be set together")
-	}
-	if c.MTLSEnabled() {
-		return nil
+	if set := c.mtlsVarsSet(); len(set) > 0 {
+		return fmt.Errorf("%s: mTLS is not implemented — this server has no TLS "+
+			"listener, so these silently served plaintext. Unset them and terminate "+
+			"TLS in a reverse proxy; AUTH_TOKEN is the only auth this server enforces",
+			strings.Join(set, ", "))
 	}
 	if c.AuthToken == "" {
-		return errors.New("HTTP transport requires AUTH_TOKEN or the full MTLS_CA_FILE/MTLS_CERT_FILE/MTLS_KEY_FILE trio")
+		return errors.New("HTTP transport requires AUTH_TOKEN")
 	}
 	return nil
 }
