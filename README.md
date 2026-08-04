@@ -237,16 +237,27 @@ make pair-qr       # render QR for the running container in the terminal
 
 ## Releases
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+Releases are cut by [release-please][rp]. Commit messages follow
+[Conventional Commits][cc] (`feat:`, `fix:`, `docs:`, `feat!:` …); on
+every push to `master`, release-please keeps a
+`chore(master): release X.Y.Z` pull request up to date with the next
+version and the generated `CHANGELOG.md`.
 
-The `release` GitHub Actions workflow builds both image variants for
-`linux/amd64` + `linux/arm64`, pushes `X.Y.Z`, `X.Y.Z-slim`, and (for
-non-prerelease tags) `latest` / `latest-slim` to Docker Hub, and
-attaches SPDX SBOMs (via `syft`) plus the immutable digests to the
-GitHub release.
+**Merging that PR is the whole release procedure.** release-please then
+tags `vX.Y.Z` and opens the GitHub release, and the `release` workflow
+builds both image variants for `linux/amd64` + `linux/arm64`, pushes
+`X.Y.Z`, `X.Y.Z-slim`, `X.Y`, and (for non-prerelease tags)
+`latest` / `latest-slim` to Docker Hub, then appends the immutable
+digests and SPDX SBOMs (via `syft`) to that release.
+
+Version bumps follow SemVer with `bump-minor-pre-major`: while the
+project is pre-1.0, `feat:` and breaking changes bump the minor, `fix:`
+bumps the patch. Pushing a `vX.Y.Z` tag by hand still works and runs the
+same build — useful for a one-off or a backfill, but it bypasses the
+changelog.
+
+[rp]: https://github.com/googleapis/release-please
+[cc]: https://www.conventionalcommits.org/
 
 ## See also
 

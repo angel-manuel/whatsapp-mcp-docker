@@ -1,0 +1,54 @@
+name: release-please
+
+# Version + changelog automation. On every push to master, release-please
+# reads the Conventional Commit messages since the last tag and maintains a
+# "chore(master): release X.Y.Z" pull request. Merging that PR is what cuts a
+# release: release-please then creates the tag and the GitHub release, and
+# this workflow hands the tag to `release.yml` to build and publish the images.
+#
+# So the release procedure is: merge the release PR. Nothing else.
+#
+# `release.yml` is *called* rather than triggered by its `on: push: tags` rule
+# because tags created with the default GITHUB_TOKEN do not fire workflow
+# triggers (GitHub's recursion guard). Calling it keeps everything on
+# GITHUB_TOKEN — no PAT to provision or rotate.
+#
+# Requires "Allow GitHub Actions to create and approve pull requests" under
+# Settings → Actions → General; without it the release PR cannot be opened.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write         # release-please labels the release PR (`autorelease: *`)
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name:        ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  images:
+    name: images
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
