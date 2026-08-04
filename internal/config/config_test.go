@@ -88,38 +88,34 @@ func TestLoad_HTTPMissingAuthFatal(t *testing.T) {
 	}
 }
 
-func TestLoad_HTTPFullMTLSOK(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("TRANSPORT", "http")
-	t.Setenv("MTLS_CA_FILE", "/run/secrets/ca.pem")
-	t.Setenv("MTLS_CERT_FILE", "/run/secrets/cert.pem")
-	t.Setenv("MTLS_KEY_FILE", "/run/secrets/key.pem")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !cfg.MTLSEnabled() {
-		t.Errorf("MTLSEnabled = false, want true")
-	}
-}
-
-func TestLoad_HTTPPartialMTLSFatal(t *testing.T) {
+// TestLoad_HTTPAnyMTLSFatal pins that no MTLS_* combination can start an HTTP
+// server. Nothing in the binary builds a tls.Config, so every one of these once
+// meant "no TLS" — and the full trio was the dangerous case, not the partial
+// ones: alone it claimed to replace AUTH_TOKEN, and alongside AUTH_TOKEN it
+// started a plaintext listener that the operator believed was mutually
+// authenticated. The token cases below are the regression test for that.
+func TestLoad_HTTPAnyMTLSFatal(t *testing.T) {
 	cases := []struct {
 		name      string
 		ca, c, k  string
-		mustMatch string
+		token     string
+		mustMatch []string
 	}{
-		{"only CA", "/ca", "", "", "MTLS_"},
-		{"only cert", "", "/cert", "", "MTLS_"},
-		{"only key", "", "", "/key", "MTLS_"},
-		{"CA+cert", "/ca", "/cert", "", "MTLS_"},
+		{"only CA", "/ca", "", "", "", []string{"MTLS_CA_FILE", "not implemented"}},
+		{"only cert", "", "/cert", "", "", []string{"MTLS_CERT_FILE", "not implemented"}},
+		{"only key", "", "", "/key", "", []string{"MTLS_KEY_FILE", "not implemented"}},
+		{"CA+cert", "/ca", "/cert", "", "", []string{"MTLS_CA_FILE", "MTLS_CERT_FILE"}},
+		// The documented-and-broken config: trio instead of AUTH_TOKEN.
+		{"full trio", "/ca", "/cert", "/key", "", []string{"MTLS_CA_FILE", "MTLS_CERT_FILE", "MTLS_KEY_FILE"}},
+		// The one that used to boot a plaintext server.
+		{"full trio with token", "/ca", "/cert", "/key", "secret", []string{"MTLS_KEY_FILE", "not implemented"}},
+		{"partial with token", "/ca", "", "", "secret", []string{"MTLS_CA_FILE", "not implemented"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			clearEnv(t)
 			t.Setenv("TRANSPORT", "http")
-			t.Setenv("AUTH_TOKEN", "") // absent
+			t.Setenv("AUTH_TOKEN", tc.token)
 			t.Setenv("MTLS_CA_FILE", tc.ca)
 			t.Setenv("MTLS_CERT_FILE", tc.c)
 			t.Setenv("MTLS_KEY_FILE", tc.k)
@@ -128,10 +124,27 @@ func TestLoad_HTTPPartialMTLSFatal(t *testing.T) {
 			if err == nil {
 				t.Fatal("Load: want error, got nil")
 			}
-			if !strings.Contains(err.Error(), tc.mustMatch) {
-				t.Errorf("error %q should contain %q", err, tc.mustMatch)
+			for _, want := range tc.mustMatch {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should contain %q", err, want)
+				}
 			}
 		})
+	}
+}
+
+// TestLoad_StdioIgnoresMTLS records that the rejection is scoped to the HTTP
+// listener. Stdio has no socket, so there is no transport security to be wrong
+// about.
+func TestLoad_StdioIgnoresMTLS(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("TRANSPORT", "stdio")
+	t.Setenv("MTLS_CA_FILE", "/run/secrets/ca.pem")
+	t.Setenv("MTLS_CERT_FILE", "/run/secrets/cert.pem")
+	t.Setenv("MTLS_KEY_FILE", "/run/secrets/key.pem")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
 	}
 }
 

@@ -579,3 +579,58 @@ func TestHTTP_ExtraRoutesShareTheBearerGate(t *testing.T) {
 		t.Fatalf("body = %q, want the {sha256} wildcard to reach the handler", body)
 	}
 }
+
+// TestBearerAuth_EmptyTokenRejectsEverything pins the middleware's behaviour
+// when it is handed no token at all. subtle.ConstantTimeCompare("", "") returns
+// 1, so the naive comparison would treat "Authorization: Bearer " — header
+// present, value empty — as a valid credential, turning a misconfiguration into
+// an open door on /mcp and the media byte route.
+//
+// Config.validate refuses to build an HTTP Server with an empty AuthToken, so
+// this state is unreachable through New; the test drives bearerAuth directly
+// because the middleware must be safe on its own, not merely well-guarded.
+func TestBearerAuth_EmptyTokenRejectsEverything(t *testing.T) {
+	t.Parallel()
+
+	var reached bool
+	ts := httptest.NewServer(bearerAuth("", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})))
+	defer ts.Close()
+
+	cases := []struct {
+		name   string
+		header string
+		set    bool
+	}{
+		{"no header", "", false},
+		{"empty bearer", "Bearer ", true},
+		{"bare prefix", "Bearer", true},
+		{"some token", "Bearer anything", true},
+		{"empty value", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, ts.URL+"/mcp", nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			if tc.set {
+				req.Header.Set("Authorization", tc.header)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+	}
+
+	if reached {
+		t.Error("wrapped handler ran; an empty token must gate every request")
+	}
+}

@@ -287,13 +287,20 @@ func (s *Server) runHTTP(ctx context.Context, core *mcpserver.MCPServer) error {
 
 // bearerAuth wraps next with a constant-time bearer-token check.
 // Requests without a matching Authorization header receive 401.
+//
+// An empty token rejects every request rather than accepting an empty one:
+// subtle.ConstantTimeCompare([]byte(""), []byte("")) returns 1, so without the
+// length guard a zero-length configured token would make "Authorization:
+// Bearer " a valid credential. Config.validate refuses to build an HTTP server
+// in that state, but this middleware must not depend on that to be safe. The
+// guard reads server config, not request input, so it leaks no timing signal.
 func bearerAuth(token string, next http.Handler) http.Handler {
 	want := []byte(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		got := []byte(strings.TrimPrefix(auth, prefix))
-		if !strings.HasPrefix(auth, prefix) || subtle.ConstantTimeCompare(got, want) != 1 {
+		if len(want) == 0 || !strings.HasPrefix(auth, prefix) || subtle.ConstantTimeCompare(got, want) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="whatsapp-mcp"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
