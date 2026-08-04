@@ -58,9 +58,12 @@ type DownloadMediaResult struct {
 // backfilled, because the direct path only exists on the live protobuf at
 // ingest time. Rows older than that migration have nothing but a media_url
 // that WhatsApp expires, so re-ingesting is the only fix.
-const staleLocatorHint = "This message was cached before media_direct_path was recorded (migration 004), " +
-	"so only its expiring media_url is available and that URL is no longer valid. " +
-	"The direct path cannot be backfilled — run the cache_sync tool to re-ingest the message, then retry."
+//
+// No trailing period: this is appended to error strings, and ST1005 wants
+// those to end without punctuation.
+const staleLocatorHint = "this message was cached before media_direct_path was recorded (migration 004), " +
+	"so only its expiring media_url is available and that URL is no longer valid; " +
+	"the direct path cannot be backfilled — run the cache_sync tool to re-ingest the message, then retry"
 
 // downloadMedia fetches the attachment bytes for one message, stores them
 // content-addressed under {DATA_DIR}/media, and returns a descriptor. It is
@@ -188,12 +191,12 @@ func fetchMedia(ctx context.Context, dl MediaDownloader, row cache.MediaRow) ([]
 	}
 
 	if row.URL == "" || strings.HasPrefix(row.URL, "https://web.whatsapp.net") {
-		return nil, errors.New("no usable media locator for this message. " + staleLocatorHint)
+		return nil, errors.New("no usable media locator for this message: " + staleLocatorHint)
 	}
 
 	data, err := dl.Download(ctx, downloadableFor(row))
 	if data, err = acceptWarnings(data, err); err != nil {
-		return nil, fmt.Errorf("download by url failed: %w. %s", err, staleLocatorHint)
+		return nil, fmt.Errorf("download by url failed: %w; %s", err, staleLocatorHint)
 	}
 	return data, nil
 }
