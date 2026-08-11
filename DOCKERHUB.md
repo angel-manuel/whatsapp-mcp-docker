@@ -99,11 +99,11 @@ client-certificate auth must front it with a reverse proxy.
 
 ## Tools
 
-20 MCP tools today: cache-backed chat / message reads
+21 MCP tools today: cache-backed chat / message reads
 (`list_chats`, `list_conversations`, `get_chat`, `list_messages`,
 `get_message_context`, `get_last_interaction`, `get_contact_chats`,
 `get_direct_chat_by_contact`, `get_conversation`), contacts (`search_contacts`,
-`list_all_contacts`, `get_contact_details`), `get_group_info`,
+`list_all_contacts`, `get_contact_details`, `resolve_jid`), `get_group_info`,
 `send_message` (text), `download_media`, and the native `ping`,
 `cache_sync`, `cache_sync_status`, `pairing_start`, `pairing_complete`.
 Full coverage matrix and

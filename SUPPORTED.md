@@ -35,6 +35,7 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Search cached contacts                       | `search_contacts`     | cache only                                                    |
 | List all cached contacts                     | `list_all_contacts`   | cache only                                                    |
 | Contact details (cache + live status / pic)  | `get_contact_details` | `UserInfo`, `IsOnWhatsApp`, `ProfilePictureURL`               |
+| Any recipient → readable identity            | `resolve_jid`         | cache only (`GetGroupInfo` only for an unnamed group)         |
 | Authoritative group metadata                 | `get_group_info`      | `GetGroupInfo`                                                |
 | Send text message                            | `send_message`        | `SendMessage` (text only)                                     |
 | Download a message attachment                | `download_media`      | `DownloadMediaWithPath`, `Download` (URL fallback)            |

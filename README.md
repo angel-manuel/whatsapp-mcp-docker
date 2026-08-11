@@ -10,9 +10,10 @@ MCP transport, pairing, session persistence — runs in **one Go process**
 inside **one Docker image**. No sidecars, no compose bundle, no second
 language runtime.
 
-Today the server ships **20 MCP tools**: cache-backed read tools for
+Today the server ships **21 MCP tools**: cache-backed read tools for
 chats and messages, plus `send_message`, `download_media`, contact /
-group lookups, `cache_sync` / `cache_sync_status`, the `ping` health
+group lookups, `resolve_jid` (any recipient → readable identity),
+`cache_sync` / `cache_sync_status`, the `ping` health
 check, and the native `pairing_start` / `pairing_complete` tools that let
 an agent drive the link flow over MCP itself. The full coverage matrix —
 including whatsmeow capabilities not yet exposed — lives in
@@ -162,13 +163,13 @@ Attachments cached before the `media_direct_path` column existed (migration
 
 ## Tools
 
-Tools shipping today (20):
+Tools shipping today (21):
 
 - **Cache-backed reads** — `list_chats`, `list_conversations`, `get_chat`,
   `list_messages`, `get_message_context`, `get_last_interaction`,
   `get_contact_chats`, `get_direct_chat_by_contact`, `get_conversation`
 - **Contacts** — `search_contacts`, `list_all_contacts`,
-  `get_contact_details`
+  `get_contact_details`, `resolve_jid`
 - **Groups** — `get_group_info`
 - **Sending** — `send_message` (text only today)
 - **Media** — `download_media` (returns a descriptor; bytes come from
