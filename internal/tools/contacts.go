@@ -37,7 +37,15 @@ type ContactView struct {
 // profile_picture_url is omitted when no picture is available and
 // is_on_whatsapp is always present as a boolean.
 type ContactDetails struct {
-	JID               string `json:"jid"`
+	JID string `json:"jid"`
+	// Name is the display-name cascade (see realDisplayName), mirroring
+	// ContactView.name so callers never have to re-derive it. Empty when
+	// no name field is known — the JID is not echoed as a pseudo-name.
+	Name string `json:"name"`
+	// Phone is the contact's phone number (the user part of their
+	// …@s.whatsapp.net JID). Empty when the real number is not known,
+	// which is the case for a @lid with no recorded alias — LID digits
+	// are an opaque identifier and must never be reported as a phone.
 	Phone             string `json:"phone"`
 	PushName          string `json:"push_name"`
 	BusinessName      string `json:"business_name"`
@@ -125,10 +133,12 @@ func listAllContacts(deps Deps) mcp.Handler {
 }
 
 // getContactDetails is the handler for get_contact_details. The JID is
-// first resolved against the local cache; if it is absent there, we fall
-// back to a whatsmeow USync (GetUserInfo + IsOnWhatsApp) so callers can
-// discover whether the JID exists at all. The profile picture URL is
-// fetched opportunistically — a missing picture is not an error.
+// first resolved against the local cache — following jid_aliases so a
+// @lid finds the contact row WhatsApp keys on the phone JID; if it is
+// absent there, we fall back to a whatsmeow USync (GetUserInfo +
+// IsOnWhatsApp) so callers can discover whether the JID exists at all.
+// The profile picture URL is fetched opportunistically — a missing
+// picture is not an error.
 func getContactDetails(deps Deps) mcp.Handler {
 	return func(ctx context.Context, args json.RawMessage) (any, error) {
 		var in struct {
@@ -146,18 +156,30 @@ func getContactDetails(deps Deps) mcp.Handler {
 			return mcp.ErrorResult(mcp.ErrInvalidArgument, fmt.Sprintf("invalid jid %q", in.JID)), nil
 		}
 
-		canonicalJID := parsed.ToNonAD().String()
+		canonical := parsed.ToNonAD()
+		canonicalJID := canonical.String()
 
 		details := ContactDetails{
 			JID:          canonicalJID,
-			Phone:        parsed.User,
 			IsOnWhatsApp: false,
 		}
 
+		// Resolve the phone JID behind the caller's address before touching
+		// the contacts table: a @lid keys no contact row of its own, and its
+		// user part is an opaque identifier rather than a phone number. When
+		// the alias is unknown, Phone stays empty.
+		phoneJID, hasPhone, err := phoneJIDFor(ctx, deps.Cache, canonical)
+		if err != nil {
+			return mcp.ErrorResult(mcp.ErrInternal, err.Error()), nil
+		}
+		if hasPhone {
+			details.Phone = phoneJID.User
+		}
+		identities := contactIdentities(canonical, phoneJID, hasPhone)
+
 		// Start from the cached row if any — we merge server data on top.
-		cached, err := deps.Cache.GetContactByJID(ctx, canonicalJID)
-		cacheHit := err == nil
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		cached, cacheHit, err := lookupContact(ctx, deps.Cache, identities)
+		if err != nil {
 			return mcp.ErrorResult(mcp.ErrInternal, err.Error()), nil
 		}
 		if cacheHit {
@@ -170,17 +192,20 @@ func getContactDetails(deps Deps) mcp.Handler {
 		} else {
 			// Nicknames can exist without a backing contact row; surface
 			// them even on the USync path.
-			if nick, nerr := deps.Cache.GetNicknameByJID(ctx, canonicalJID); nerr == nil {
-				details.Nickname = nick
+			for _, id := range identities {
+				if nick, nerr := deps.Cache.GetNicknameByJID(ctx, id.String()); nerr == nil && nick != "" {
+					details.Nickname = nick
+					break
+				}
 			}
 		}
 
-		// USync for status + LID + profile picture. Only users on the
-		// regular whatsapp server support this; for group / broadcast /
-		// newsletter JIDs we short-circuit the USync call.
-		if parsed.Server == types.DefaultUserServer || parsed.Server == types.LegacyUserServer || parsed.Server == types.HiddenUserServer {
-			if ui, err := deps.WA.UserInfo(ctx, []types.JID{parsed.ToNonAD()}); err == nil {
-				if entry, ok := ui[parsed.ToNonAD()]; ok {
+		// USync for status + LID + profile picture. Only user JIDs support
+		// this; for group / broadcast / newsletter JIDs we short-circuit
+		// the USync call.
+		if jidKind(canonical) == jidKindUser {
+			if ui, err := deps.WA.UserInfo(ctx, []types.JID{canonical}); err == nil {
+				if entry, ok := ui[canonical]; ok {
 					if entry.Status != "" {
 						details.Status = entry.Status
 					}
@@ -194,10 +219,12 @@ func getContactDetails(deps Deps) mcp.Handler {
 				// not_paired to keep the error taxonomy consistent.
 				return mcp.NotPairedError(), nil
 			}
-			// Only attempt phone-number registration check when we have
-			// a plausible phone number (regular user server).
-			if !details.IsOnWhatsApp && parsed.Server == types.DefaultUserServer {
-				if checks, err := deps.WA.IsOnWhatsApp(ctx, []string{"+" + parsed.User}); err == nil {
+			// Only attempt phone-number registration check when we know a
+			// real phone number — hasPhone is false for an unaliased @lid,
+			// whose user part would be rejected (or worse, silently match
+			// someone else) as a phone number.
+			if !details.IsOnWhatsApp && hasPhone {
+				if checks, err := deps.WA.IsOnWhatsApp(ctx, []string{"+" + phoneJID.User}); err == nil {
 					for _, r := range checks {
 						if r.IsIn {
 							details.IsOnWhatsApp = true
@@ -208,7 +235,7 @@ func getContactDetails(deps Deps) mcp.Handler {
 					return mcp.NotPairedError(), nil
 				}
 			}
-			if url, err := deps.WA.ProfilePictureURL(ctx, parsed.ToNonAD()); err == nil && url != "" {
+			if url, err := deps.WA.ProfilePictureURL(ctx, canonical); err == nil && url != "" {
 				details.ProfilePictureURL = url
 			}
 			// Profile-picture errors are non-fatal (401 "forbidden" is
@@ -219,8 +246,93 @@ func getContactDetails(deps Deps) mcp.Handler {
 		if !cacheHit && !details.IsOnWhatsApp {
 			return mcp.ErrorResult(mcp.ErrNotFound, fmt.Sprintf("no contact found for %q", in.JID)), nil
 		}
+		// Derived last so the cascade sees the USync-supplied business name
+		// as well as the cached fields.
+		details.Name = realDisplayName(cache.ContactRow{
+			JID:          canonicalJID,
+			PushName:     details.PushName,
+			BusinessName: details.BusinessName,
+			FirstName:    details.FirstName,
+			FullName:     details.FullName,
+			Nickname:     details.Nickname,
+		})
 		return details, nil
 	}
+}
+
+// phoneJIDFor returns the phone-number JID (…@s.whatsapp.net) the given
+// address belongs to. A phone JID is its own answer; a privacy LID is
+// resolved through the cache's jid_aliases table, which the ingestor
+// populates from the alternate address WhatsApp attaches to live messages.
+//
+// The bool is false when no phone JID is known — for a LID that is the
+// common case on a cold cache. Callers must then leave the phone number
+// empty: LID digits are an opaque identifier, and reporting them as a
+// phone number is worse than reporting nothing.
+func phoneJIDFor(ctx context.Context, store *cache.Store, jid types.JID) (types.JID, bool, error) {
+	switch jid.Server {
+	case types.DefaultUserServer, types.LegacyUserServer:
+		return jid, true, nil
+	case types.HiddenUserServer:
+		// Fall through to the alias lookup below.
+	default:
+		// Groups, newsletters, broadcasts: no phone number to derive.
+		return types.JID{}, false, nil
+	}
+	linked, err := store.ResolveLinkedJIDs(ctx, jid.String())
+	if err != nil {
+		return types.JID{}, false, err
+	}
+	for _, l := range linked {
+		alias, err := types.ParseJID(l)
+		if err != nil {
+			continue
+		}
+		if alias.Server == types.DefaultUserServer || alias.Server == types.LegacyUserServer {
+			return alias.ToNonAD(), true, nil
+		}
+	}
+	return types.JID{}, false, nil
+}
+
+// contactIdentities lists the JIDs a contact's cached rows may be keyed
+// on, phone JID first — that is where WhatsApp records contacts, so it is
+// the identity worth trying before the address the caller supplied.
+func contactIdentities(jid, phoneJID types.JID, hasPhone bool) []types.JID {
+	if hasPhone && phoneJID.String() != jid.String() {
+		return []types.JID{phoneJID, jid}
+	}
+	return []types.JID{jid}
+}
+
+// lookupContact returns the first cached contact row found across the
+// candidate identities. A row missing from every identity is reported as
+// ok=false with a nil error — only a real read failure returns one.
+func lookupContact(ctx context.Context, store *cache.Store, identities []types.JID) (cache.ContactRow, bool, error) {
+	for _, id := range identities {
+		row, err := store.GetContactByJID(ctx, id.String())
+		switch {
+		case err == nil:
+			return row, true, nil
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		default:
+			return cache.ContactRow{}, false, err
+		}
+	}
+	return cache.ContactRow{}, false, nil
+}
+
+// realDisplayName is ContactRow.DisplayName with its JID fallback removed:
+// it returns "" when no name field is populated, so a phone number or LID
+// digits are never presented as if they were a name. Mirrors the same
+// convention mcptools applies to MessageDTO.sender_name.
+func realDisplayName(r cache.ContactRow) string {
+	if r.Nickname == "" && r.FullName == "" && r.PushName == "" &&
+		r.FirstName == "" && r.BusinessName == "" {
+		return ""
+	}
+	return r.DisplayName()
 }
 
 func toContactViews(rows []cache.ContactRow) []ContactView {

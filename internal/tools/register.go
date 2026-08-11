@@ -44,6 +44,12 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			Handler:     getContactDetails(deps),
 		},
 		{
+			Name:        "resolve_jid",
+			Description: "Resolve any value send_message accepts as its recipient — phone JID, @lid, group, newsletter, or bare phone number — to a readable identity: display name, canonical phone JID and E.164 phone number. Follows the lid<->phone alias map, so a @lid never reports its own digits as a phone number. Cache-first, so it is cheap enough to call while rendering a send approval. A JID nothing is known about returns empty fields rather than an error.",
+			InputSchema: resolveJIDSchema,
+			Handler:     resolveJID(deps),
+		},
+		{
 			Name:        "get_group_info",
 			Description: "Fetch authoritative group metadata via whatsmeow GetGroupInfo (name, topic, participants, flags).",
 			InputSchema: getGroupInfoSchema,

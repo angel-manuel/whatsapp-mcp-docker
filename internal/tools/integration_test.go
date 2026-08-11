@@ -599,13 +599,13 @@ func TestTools_NotPairedShortCircuits(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, false, seedContacts, &mockWA{})
 
-	for _, name := range []string{"search_contacts", "list_all_contacts", "get_contact_details", "get_group_info", "send_message", "cache_sync"} {
+	for _, name := range []string{"search_contacts", "list_all_contacts", "get_contact_details", "resolve_jid", "get_group_info", "send_message", "cache_sync"} {
 		t.Run(name, func(t *testing.T) {
 			var args map[string]any
 			switch name {
 			case "search_contacts":
 				args = map[string]any{"query": "x"}
-			case "get_contact_details":
+			case "get_contact_details", "resolve_jid":
 				args = map[string]any{"jid": "111@s.whatsapp.net"}
 			case "get_group_info":
 				args = map[string]any{"group_jid": "xxx@g.us"}
@@ -889,6 +889,7 @@ func TestTools_ListRegisteredToolsAdvertisesSchemas(t *testing.T) {
 		"search_contacts":     false,
 		"list_all_contacts":   false,
 		"get_contact_details": false,
+		"resolve_jid":         false,
 		"get_group_info":      false,
 		"send_message":        false,
 		"pairing_start":       false,
