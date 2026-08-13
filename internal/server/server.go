@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/audio"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/config"
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
@@ -113,9 +114,10 @@ func (s *Server) Run(ctx context.Context) error {
 			slog.String("err", err.Error()))
 	}
 
-	// Media blobs downloaded by download_media and served by the
-	// GET /media/{sha256} byte route. Opened before the MCP server so its
-	// handler can be mounted on the same mux, behind the same bearer auth.
+	// Media blobs: downloaded by download_media, uploaded by POST /media
+	// for the send tools to reference, and served by GET /media/{sha256}.
+	// Opened before the MCP server so both handlers can be mounted on the
+	// same mux, behind the same bearer auth.
 	mediaStore, err := media.Open(s.cfg.MediaDir(), media.Options{
 		MaxBytes: s.cfg.MediaMaxBytes,
 		TTL:      s.cfg.MediaTTL,
@@ -135,6 +137,11 @@ func (s *Server) Run(ctx context.Context) error {
 		Ingestor: ingestor,
 		Sync:     syncOrch,
 		Media:    mediaStore,
+		// Probed per call, not at startup: the distroless image ships no
+		// ffmpeg, and an operator may bind-mount one into a running
+		// container. Absent ffmpeg means non-Opus audio is refused, never
+		// silently sent (REQUIREMENTS.md, FFMPEG_PATH).
+		Audio: audio.NewTranscoder(s.cfg.FFmpegPath),
 	}); err != nil {
 		return fmt.Errorf("register tools: %w", err)
 	}
@@ -216,12 +223,14 @@ func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store, mediaStore 
 	if err := mcptools.Register(reg, cacheStore); err != nil {
 		return nil, fmt.Errorf("register cache tools: %w", err)
 	}
-	// The media byte route rides the MCP listener: same port, same
-	// AUTH_TOKEN, same bearer middleware. It exists for the one thing MCP
-	// cannot do — transfer bytes — and deliberately does not reopen the
-	// :8082 admin API removed in 99b0ce7.
+	// The media byte routes ride the MCP listener: same port, same
+	// AUTH_TOKEN, same bearer middleware. They exist for the one thing MCP
+	// cannot do — transfer bytes — and deliberately do not reopen the
+	// :8082 admin API removed in 99b0ce7. GET is the download_media half;
+	// POST is the inbound half the media send tools consume.
 	routes := map[string]http.Handler{
 		media.RoutePrefix + "{sha256}": mediaStore.Handler(),
+		media.UploadRoutePattern:       mediaStore.UploadHandler(),
 	}
 	return mcp.New(mcp.Config{
 		Transport: mcp.TransportMode(s.cfg.Transport),

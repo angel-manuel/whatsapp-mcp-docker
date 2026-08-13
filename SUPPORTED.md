@@ -39,6 +39,8 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Any recipient → readable identity            | `resolve_jid`         | cache only (`GetGroupInfo` only for an unnamed group)         |
 | Authoritative group metadata                 | `get_group_info`      | `GetGroupInfo`                                                |
 | Send text message                            | `send_message`        | `SendMessage` (text only)                                     |
+| Send an image / video / audio / document / sticker | `send_file`     | `UploadReader` (`Upload` when audio is transcoded) + `SendMessage` (`ImageMessage`, `VideoMessage`, `AudioMessage`, `DocumentMessage`, `StickerMessage`) |
+| Send a voice note (PTT)                      | `send_audio_message`  | `UploadReader` / `Upload` + `SendMessage` (`AudioMessage` with `PTT`); ffmpeg transcode to Opus when `FFMPEG_PATH` resolves |
 | React to a message with an emoji             | `send_reaction`       | `BuildReaction` + `SendMessage`                               |
 | Create a poll                                | `send_poll`           | `BuildPollCreation` + `SendMessage` (+ `PutMessageSecret`, so votes on our own poll stay readable) |
 | Vote on / withdraw from a poll               | `vote_poll`           | `BuildPollVote` + `SendMessage`                               |
@@ -130,6 +132,7 @@ are MCP tools (`pairing_start`, `pairing_complete`, `ping`).
 | Endpoint               | Backed by                                        |
 | ---------------------- | ------------------------------------------------ |
 | `GET /media/{sha256}`  | `media.Store` — serves blobs stored by `download_media`; `Range`, `ETag`, `Content-Disposition` |
+| `POST /media`          | `media.Store` — stores the request body content-addressed and answers `201` with the same descriptor shape; the `media_path` it returns is what `send_file` / `send_audio_message` take. `Content-Type` sets the mimetype (sniffed when absent), `?filename=` names the file, bodies over 100 MiB are refused with `413` |
 
 ---
 
@@ -147,7 +150,6 @@ is genuinely uncalled.
 
 | whatsmeow                                           | Notes                                                              |
 | --------------------------------------------------- | ------------------------------------------------------------------ |
-| ⭐ `SendMessage` for media envelopes                | image/video/audio/document/sticker. Today only text is supported. |
 | ⭐ `RevokeMessage` (`BuildRevoke` + send)           | delete-for-everyone.                                               |
 | ⭐ `BuildEdit` + `SendMessage`                      | edit a previously sent message.                                    |
 
@@ -198,11 +200,10 @@ is genuinely uncalled.
 
 | whatsmeow                                                                  | Notes                                                          |
 | -------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `DownloadThumbnail`                                                        | link-preview thumbnails; `JPEGThumbnail` is not captured at ingest today. |
+| `DownloadThumbnail`                                                        | link-preview thumbnails; `JPEGThumbnail` is not captured at ingest today, and outbound envelopes from `send_file` do not carry one either (recipients render a placeholder until the bytes arrive). |
 | `DownloadHistorySync`                                                      | large blob retrieval.                                          |
 | `DownloadToFile` / `DownloadMediaWithPathToFile`                           | streaming-to-disk variants. `download_media` buffers in memory and writes content-addressed. |
 | `DownloadFB` / `DownloadFBToFile`                                          | Facebook CDN variant.                                          |
-| `Upload` / `UploadReader`                                                  | required by any media-send tool.                               |
 | `DeleteMedia`                                                              | server-side delete.                                            |
 
 ### Identity & contacts (partial today)

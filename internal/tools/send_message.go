@@ -96,7 +96,8 @@ func sendMessage(deps Deps) mcp.Handler {
 			ts = time.Now().UTC()
 		}
 
-		if err := mirrorOutbound(ctx, deps.Cache, chatJID, ownJID, to, in.Text, string(resp.ID), in.ReplyToID, ts); err != nil {
+		if err := mirrorOutbound(ctx, deps.Cache, chatJID, ownJID, to,
+			in.Text, string(resp.ID), in.ReplyToID, ts); err != nil {
 			return mcp.ErrorResult(mcp.ErrInternal, fmt.Sprintf("cache outbound: %v", err)), nil
 		}
 
@@ -112,14 +113,9 @@ func sendMessage(deps Deps) mcp.Handler {
 // Plain sends use Conversation; replies use ExtendedTextMessage so
 // ContextInfo can carry the quoted stanza id.
 func buildOutboundMessage(text, replyTo string, owner types.JID) *waE2E.Message {
-	if replyTo == "" {
+	ci := replyContext(replyTo, owner)
+	if ci == nil {
 		return &waE2E.Message{Conversation: proto.String(text)}
-	}
-	ci := &waE2E.ContextInfo{StanzaID: proto.String(replyTo)}
-	if !owner.IsEmpty() {
-		// WhatsApp expects ContextInfo.Participant on a reply; for an
-		// outbound send this is always our own non-AD JID.
-		ci.Participant = proto.String(owner.ToNonAD().String())
 	}
 	return &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
@@ -127,6 +123,22 @@ func buildOutboundMessage(text, replyTo string, owner types.JID) *waE2E.Message 
 			ContextInfo: ci,
 		},
 	}
+}
+
+// replyContext builds the ContextInfo that turns a send into a quote-reply,
+// or nil when replyTo is empty. Shared by every send tool: a text reply and
+// an image reply carry the same quoted-stanza shape.
+func replyContext(replyTo string, owner types.JID) *waE2E.ContextInfo {
+	if replyTo == "" {
+		return nil
+	}
+	ci := &waE2E.ContextInfo{StanzaID: proto.String(replyTo)}
+	if !owner.IsEmpty() {
+		// WhatsApp expects ContextInfo.Participant on a reply; for an
+		// outbound send this is always our own non-AD JID.
+		ci.Participant = proto.String(owner.ToNonAD().String())
+	}
+	return ci
 }
 
 func mirrorOutbound(ctx context.Context, store *cache.Store, chatJID string, ownJID, to types.JID, body, msgID, replyTo string, ts time.Time) error {

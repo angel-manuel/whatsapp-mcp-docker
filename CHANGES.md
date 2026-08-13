@@ -72,6 +72,28 @@ are strictly additive — clients that don't call them see no change.
 
 ## Sending tools
 
+### `send_file` / `send_audio_message` — `media_path` is a reference, not a local path
+
+- **Reference**: both take `media_path`, an absolute path on the machine
+  running the MCP server, and read the file off that filesystem. As with
+  `download_media`, that assumes the client and the server share a disk.
+- **Go**: `media_path` is the same `/media/<sha256>` reference
+  `download_media` hands back. Bytes get into the container through
+  `POST /media` on the MCP port, behind the MCP bearer token, and the tool
+  call carries only the pointer. A bare `<sha256>` and a gateway URL ending
+  in one are accepted too, so a caller does not have to reconstruct the
+  path. Argument names are otherwise unchanged, and `send_file` adds
+  optional `media_type`, `caption`, `filename` and `reply_to_id`.
+- **Why**: same reasoning as `download_media`, in the other direction —
+  and it makes forwarding free: the `media_path` from a `download_media`
+  call can be passed straight to `send_file` with no bytes moving at all.
+- **Also**: the reference's `send_file` shells out to ffmpeg for every
+  audio input and errors with "you likely need to install ffmpeg" when it
+  is missing. The Go tools probe `FFMPEG_PATH` per call and only transcode
+  what WhatsApp cannot play; with no ffmpeg, Opus is still sendable and
+  everything else is refused with `invalid_argument` rather than uploaded
+  as an unplayable message.
+
 ### `send_reaction` — structured result, plus an optional `sender_jid`
 
 - **Reference**: `send_reaction(chat_jid, message_id, emoji)` returning

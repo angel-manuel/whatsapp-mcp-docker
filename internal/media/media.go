@@ -83,6 +83,10 @@ type Options struct {
 	MaxBytes int64
 	// TTL evicts blobs older than this. Zero disables age-based eviction.
 	TTL time.Duration
+	// MaxUploadBytes caps a single inbound blob (POST /media). Zero means
+	// DefaultMaxUploadBytes. Unlike MaxBytes this is a hard refusal, not an
+	// eviction trigger.
+	MaxUploadBytes int64
 	// Logger receives sweep results. Nil defaults to slog.Default.
 	Logger *slog.Logger
 }
@@ -106,6 +110,9 @@ func Open(dir string, opts Options) (*Store, error) {
 	}
 	if opts.TTL < 0 {
 		return nil, fmt.Errorf("media: TTL must not be negative, got %s", opts.TTL)
+	}
+	if opts.MaxUploadBytes < 0 {
+		return nil, fmt.Errorf("media: MaxUploadBytes must not be negative, got %d", opts.MaxUploadBytes)
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("media: create %s: %w", dir, err)
