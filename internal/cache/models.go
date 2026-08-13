@@ -85,6 +85,10 @@ const (
 	KindDocument MessageKind = "document"
 	// KindSticker is a sticker envelope.
 	KindSticker MessageKind = "sticker"
+	// KindPoll is a poll creation envelope. Body is the poll question; the
+	// ballot and its running tally live in the polls / poll_options /
+	// poll_votes tables.
+	KindPoll MessageKind = "poll"
 	// KindOther covers message kinds we do not surface yet.
 	KindOther MessageKind = "other"
 )

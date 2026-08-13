@@ -509,6 +509,55 @@ func TestListMessages_EnrichedFields(t *testing.T) {
 	}
 }
 
+// A poll creation message must be distinguishable from an ordinary text
+// message: its content is just the question, so without `kind` a caller has no
+// way to find the id vote_poll / get_poll_results take.
+func TestListMessages_ExposesMessageKind(t *testing.T) {
+	t.Parallel()
+	const jidPoll = "555@s.whatsapp.net"
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) {
+		ctx := context.Background()
+		if err := s.UpsertChat(ctx, cache.Chat{JID: jidPoll, Name: "Pollster", LastMessageTS: tsAlice2}); err != nil {
+			t.Fatalf("seed chat: %v", err)
+		}
+		if err := s.InsertMessage(ctx, cache.Message{
+			ID: "m-poll-1", ChatJID: jidPoll, SenderJID: jidPoll,
+			Timestamp: tsAlice2, Kind: cache.KindPoll, Body: "Lunch?",
+		}); err != nil {
+			t.Fatalf("seed poll message: %v", err)
+		}
+	})
+
+	out := callTool(t, c, "list_messages", map[string]any{"chat_jid": jidPoll})
+	msgs := out["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("len(messages) = %d, want 1", len(msgs))
+	}
+	m := msgs[0].(map[string]any)
+	if m["kind"] != "poll" {
+		t.Errorf("kind = %v, want poll", m["kind"])
+	}
+	if m["content"] != "Lunch?" {
+		t.Errorf("content = %v, want the poll question", m["content"])
+	}
+	// A poll is not a downloadable envelope.
+	if v, ok := m["media_type"]; !ok || v != nil {
+		t.Errorf("media_type = %v (present=%v), want null", v, ok)
+	}
+
+	// Every other kind is reported too, so the field is usable as a filter.
+	alice := callTool(t, c, "list_messages", map[string]any{"chat_jid": jidAlice})
+	first := alice["messages"].([]any)[0].(map[string]any)
+	if first["kind"] != "text" {
+		t.Errorf("text message kind = %v, want text", first["kind"])
+	}
+	bob := callTool(t, c, "list_messages", map[string]any{"chat_jid": jidBob})
+	img := bob["messages"].([]any)[0].(map[string]any)
+	if img["kind"] != "image" {
+		t.Errorf("image message kind = %v, want image", img["kind"])
+	}
+}
+
 func TestListMessages_AfterBeforeFilterByTimestamp(t *testing.T) {
 	t.Parallel()
 	c := newServerAndClient(t)

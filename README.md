@@ -10,9 +10,10 @@ MCP transport, pairing, session persistence — runs in **one Go process**
 inside **one Docker image**. No sidecars, no compose bundle, no second
 language runtime.
 
-Today the server ships **22 MCP tools**: cache-backed read tools for
-chats and messages, plus `send_message`, `send_reaction`,
-`download_media`, contact / group lookups, `resolve_jid` (any recipient → readable identity),
+Today the server ships **25 MCP tools**: cache-backed read tools for
+chats and messages, plus `send_message`, `send_reaction`, polls
+(`send_poll` / `vote_poll` / `get_poll_results`), `download_media`,
+contact / group lookups, `resolve_jid` (any recipient → readable identity),
 `cache_sync` / `cache_sync_status`, the `ping` health
 check, and the native `pairing_start` / `pairing_complete` tools that let
 an agent drive the link flow over MCP itself. The full coverage matrix —
@@ -163,7 +164,7 @@ Attachments cached before the `media_direct_path` column existed (migration
 
 ## Tools
 
-Tools shipping today (22):
+Tools shipping today (25):
 
 - **Cache-backed reads** — `list_chats`, `list_conversations`, `get_chat`,
   `list_messages`, `get_message_context`, `get_last_interaction`,
@@ -172,6 +173,10 @@ Tools shipping today (22):
   `get_contact_details`, `resolve_jid`
 - **Groups** — `get_group_info`
 - **Sending** — `send_message` (text only today), `send_reaction`
+- **Polls** — `send_poll`, `vote_poll`, `get_poll_results`. Results are
+  tallied from vote events as they arrive: WhatsApp offers no way to query
+  a poll's standings, so votes cast before the device was linked (or while
+  the container was down) are not counted.
 - **Media** — `download_media` (returns a descriptor; bytes come from
   `GET /media/<sha256>`)
 - **Native** — `ping`, `cache_sync`, `cache_sync_status`, `pairing_start`,

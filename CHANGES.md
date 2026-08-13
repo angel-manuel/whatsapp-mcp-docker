@@ -101,6 +101,26 @@ are strictly additive — clients that don't call them see no change.
   split `message_id` / `target_id` is required to report the send at all
   — a reaction has its own stanza id.
 
+### `send_poll` / `vote_poll` / `get_poll_results`
+
+- **Reference**: names one poll tool, `create_poll`, and stops there — the
+  Python server can create a poll but cannot vote in one or read the
+  result.
+- **Go**: three tools. The creation tool is named **`send_poll`**, not
+  `create_poll`, so every outbound tool reads the same way
+  (`send_message`, `send_poll`); the argument shape is otherwise what the
+  reference name implies. `vote_poll` and `get_poll_results` are
+  additive — no reference equivalent, so no client can be broken by them.
+- **Why**: a poll nobody can answer or count is not a feature, and the
+  two additions are not optional extras but the other half of the one the
+  reference names. `get_poll_results` in particular can only exist here:
+  neither whatsmeow nor the WhatsApp protocol exposes a way to ask the
+  server for a poll's standings, so the tally is accumulated locally from
+  the vote events the ingestor decrypts (migration `006`). Every result
+  carries a `caveat` field saying so — votes cast before this device was
+  linked, or while the container was down, are not counted and cannot be
+  recovered.
+
 ## Read-side tools (cache-backed)
 
 ### `list_chats` — list wrapped in object
@@ -179,6 +199,22 @@ are strictly additive — clients that don't call them see no change.
   `str` in `main.py` but actually returned a Message dict from the
   underlying module; the Go tool returns a Message-shaped object
   directly with a `message` JSON schema, closing the gap.
+
+### `MessageDTO.kind` — the cached message kind, alongside `media_type`
+
+- **Reference**: `Message.to_dict()` exposes `media_type`, which is
+  non-null only for downloadable envelopes. Anything else — including a
+  poll — is indistinguishable from plain text.
+- **Go**: every message carries `kind` (`text`, `image`, `video`,
+  `audio`, `document`, `sticker`, `poll`, `other`) in addition to the
+  unchanged `media_type`. Strictly additive: clients that ignore it see
+  exactly the reference shape.
+- **Why**: `vote_poll` and `get_poll_results` take the poll's message id,
+  and `list_messages` / `get_message_context` are where a caller gets
+  message ids. Without `kind`, an incoming poll arrives as an ordinary
+  message whose content happens to be the question, so the id is
+  unfindable and the receive-a-poll-then-vote flow cannot be driven at
+  all.
 
 ## Error surface
 

@@ -52,6 +52,11 @@ type ConversationDTO struct {
 //     has no delivery columns), so this is currently always "unknown" — a
 //     truthful stub, never an invented checkmark. When receipt ingestion
 //     lands, this field carries the real ack level.
+//   - Kind: the cached message kind verbatim. MediaType covers only the
+//     downloadable envelopes, so without this a non-media, non-text message
+//     is indistinguishable from plain text: a poll would arrive as an
+//     ordinary message whose content happens to be the question, and the
+//     id vote_poll / get_poll_results need would be unfindable.
 //   - Reactions: the emoji reactions currently on the message, so "they
 //     thumbs-upped it" is data rather than something the caller infers. Omitted
 //     from the JSON entirely when there are none, which is the common case.
@@ -66,6 +71,7 @@ type MessageDTO struct {
 	IsFromMe       bool   `json:"is_from_me"`
 	Direction      string `json:"direction"`       // "incoming" | "outgoing", derived from is_from_me
 	DeliveryStatus string `json:"delivery_status"` // "sent" | "delivered" | "read" | "unknown"
+	Kind           string `json:"kind"`            // "text" | "image" | "video" | "audio" | "document" | "sticker" | "poll" | "other"
 	MediaType      any    `json:"media_type"`      // string | null
 	Filename       any    `json:"filename,omitempty"`
 	FileLength     any    `json:"file_length,omitempty"`
@@ -139,6 +145,7 @@ const messageSchemaFragment = `{
     "is_from_me":      {"type": "boolean"},
     "direction":       {"type": "string", "enum": ["incoming","outgoing"], "description": "Derived from is_from_me; callers need not interpret the bool."},
     "delivery_status": {"type": "string", "enum": ["sent","delivered","read","unknown"], "description": "WhatsApp ack level. Currently always 'unknown' until the cache ingests receipt/ack stanzas; never an inferred value."},
+    "kind":            {"type": "string", "enum": ["text","image","video","audio","document","sticker","poll","other"], "description": "Cached message kind. 'poll' marks a poll creation message whose content is the question; its id is what vote_poll and get_poll_results take."},
     "media_type":      {"type": ["string","null"]},
     "filename":        {"type": ["string","null"]},
     "file_length":     {"type": ["integer","null"]},
@@ -150,5 +157,5 @@ const messageSchemaFragment = `{
                                                  "is_from_me":  {"type": "boolean"}},
                                   "required": ["emoji","sender","is_from_me"]}}
   },
-  "required": ["id","chat_jid","sender","content","is_from_me","direction","delivery_status"]
+  "required": ["id","chat_jid","sender","content","is_from_me","direction","delivery_status","kind"]
 }`

@@ -59,6 +59,16 @@ func (f *fakeWA) BuildReaction(types.JID, types.JID, types.MessageID, string) *w
 }
 func (f *fakeWA) OwnJID() types.JID { return types.JID{} }
 
+func (f *fakeWA) BuildPollCreation(string, []string, int) (*waE2E.Message, error) {
+	return nil, wa.ErrNotLoggedIn
+}
+func (f *fakeWA) BuildPollVote(context.Context, *types.MessageInfo, []string) (*waE2E.Message, error) {
+	return nil, wa.ErrNotLoggedIn
+}
+func (f *fakeWA) StoreMessageSecret(context.Context, types.JID, types.JID, types.MessageID, []byte) error {
+	return nil
+}
+
 // Whatsmeow is never exercised by the pairing tests; download_media is the
 // only caller and it supplies its own MediaDownloader.
 func (f *fakeWA) Whatsmeow() *whatsmeow.Client { return nil }

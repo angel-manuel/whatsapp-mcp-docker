@@ -52,6 +52,15 @@ type mockWA struct {
 	lastSendTo types.JID
 	lastSendMs *waE2E.Message
 
+	// Poll surface. buildPollVoteErr lets a test drive the "this device never
+	// held the poll's secret" path without a real crypto store; secrets
+	// records what StoreMessageSecret was asked to persist.
+	buildPollErr     error
+	buildPollVoteErr error
+	lastPollInfo     *types.MessageInfo
+	lastPollOptions  []string
+	secrets          []storedSecret
+	storeSecretErr   error
 	// Reaction surface. buildReactionNil simulates the pre-pair case where
 	// whatsmeow has no client yet; the lastReaction* fields capture the
 	// arguments so tests can assert the target's author was resolved.
@@ -156,6 +165,55 @@ func (m *mockWA) BuildReaction(chat, sender types.JID, id types.MessageID, emoji
 }
 
 func (m *mockWA) OwnJID() types.JID { return m.ownJID }
+
+// storedSecret is one StoreMessageSecret call, kept so tests can assert that
+// send_poll persisted the secret its own votes will later be decrypted with.
+type storedSecret struct {
+	chat   types.JID
+	sender types.JID
+	id     types.MessageID
+	secret []byte
+}
+
+// BuildPollCreation mirrors whatsmeow's own builder closely enough for the
+// tool to be exercised end to end: the generated message secret matters,
+// because send_poll must hand it to StoreMessageSecret.
+func (m *mockWA) BuildPollCreation(name string, options []string, selectableCount int) (*waE2E.Message, error) {
+	if m.buildPollErr != nil {
+		return nil, m.buildPollErr
+	}
+	opts := make([]*waE2E.PollCreationMessage_Option, len(options))
+	for i, o := range options {
+		opts[i] = &waE2E.PollCreationMessage_Option{OptionName: proto.String(o)}
+	}
+	return &waE2E.Message{
+		PollCreationMessage: &waE2E.PollCreationMessage{
+			Name:                   proto.String(name),
+			Options:                opts,
+			SelectableOptionsCount: proto.Uint32(uint32(selectableCount)), //nolint:gosec // bounded by the tool's schema
+		},
+		MessageContextInfo: &waE2E.MessageContextInfo{MessageSecret: []byte("test-poll-secret")},
+	}, nil
+}
+
+func (m *mockWA) BuildPollVote(_ context.Context, pollInfo *types.MessageInfo, optionNames []string) (*waE2E.Message, error) {
+	m.lastPollInfo = pollInfo
+	m.lastPollOptions = optionNames
+	if m.buildPollVoteErr != nil {
+		return nil, m.buildPollVoteErr
+	}
+	return &waE2E.Message{PollUpdateMessage: &waE2E.PollUpdateMessage{
+		PollCreationMessageKey: &waCommon.MessageKey{ID: proto.String(pollInfo.ID)},
+	}}, nil
+}
+
+func (m *mockWA) StoreMessageSecret(_ context.Context, chat, sender types.JID, id types.MessageID, secret []byte) error {
+	if m.storeSecretErr != nil {
+		return m.storeSecretErr
+	}
+	m.secrets = append(m.secrets, storedSecret{chat: chat, sender: sender, id: id, secret: secret})
+	return nil
+}
 
 // Whatsmeow returns nil: no test in this file downloads media, and
 // download_media resolves its downloader through Deps.Downloader instead.

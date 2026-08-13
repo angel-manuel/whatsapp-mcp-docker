@@ -100,7 +100,7 @@ func downloadMedia(deps Deps) mcp.Handler {
 		}
 
 		if !row.HasMedia() {
-			if row.Kind == cache.KindText || row.Kind == cache.KindOther {
+			if row.Kind == cache.KindText || row.Kind == cache.KindPoll || row.Kind == cache.KindOther {
 				return mcp.NoMediaError(fmt.Sprintf(
 					"message %s is a %s message and carries no attachment", messageID, row.Kind)), nil
 			}

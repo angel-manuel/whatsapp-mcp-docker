@@ -288,6 +288,7 @@ func buildMessageDTO(id, chatJID, chatName, sender, senderName, body string, ts 
 		IsFromMe:       isFromMe,
 		Direction:      direction,
 		DeliveryStatus: deliveryStatusUnknown,
+		Kind:           normaliseKind(kind),
 	}
 	media := mapKindToMediaType(kind)
 	if media == "" {
@@ -302,6 +303,23 @@ func buildMessageDTO(id, chatJID, chatName, sender, senderName, body string, ts 
 		}
 	}
 	return dto
+}
+
+// normaliseKind maps the stored `messages.kind` value onto the closed set the
+// message schema declares. An empty column (rows written before a kind was
+// recorded) reads as text; anything outside the vocabulary collapses to
+// "other" rather than escaping as a value clients validating against the
+// declared enum would reject.
+func normaliseKind(kind string) string {
+	switch cache.MessageKind(kind) {
+	case cache.KindText, cache.KindImage, cache.KindVideo, cache.KindAudio,
+		cache.KindDocument, cache.KindSticker, cache.KindPoll, cache.KindOther:
+		return kind
+	case "":
+		return string(cache.KindText)
+	default:
+		return string(cache.KindOther)
+	}
 }
 
 // mapKindToMediaType converts the local `messages.kind` column
