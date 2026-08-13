@@ -89,7 +89,7 @@ Published to Docker Hub on every release tag:
 | Tag | Base | Use when |
 |---|---|---|
 | `angelmanuel/whatsapp-mcp:latest` | distroless/static, non-root, no shell | **Default.** Smallest, hardest to misuse. |
-| `angelmanuel/whatsapp-mcp:latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You need `send_audio_message` to transcode arbitrary input to Opus, or you want a shell for triage. |
+| `angelmanuel/whatsapp-mcp:latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You want a shell for triage. `ffmpeg` is shipped ahead of the audio-send path (transcoding arbitrary input to Opus); no tool invokes it today. |
 
 Both are multi-arch (`linux/amd64`, `linux/arm64`). Each release also
 publishes immutable `:X.Y.Z` and `:X.Y.Z-slim` tags (no `v` prefix —

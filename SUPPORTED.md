@@ -4,7 +4,8 @@ A snapshot of which `whatsmeow.Client` (and admin) capabilities are exposed
 as MCP tools today, and which are not. The "Tool" column is the registered
 MCP name; "—" means no tool. Keep this file in sync when adding new tools.
 
-Last reviewed: 2026-04-27 against `go.mau.fi/whatsmeow v0.0.0-20260421083005`.
+Last reviewed: 2026-08-13 against `go.mau.fi/whatsmeow v0.0.0-20260421083005-5b8886176ff7`
+(the revision pinned in `go.mod`).
 
 ---
 
@@ -34,13 +35,14 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Cache diagnostic snapshot                    | `cache_sync_status`   | (custom; reads `Ingestor.LastEventAt` + table counts)         |
 | Search cached contacts                       | `search_contacts`     | cache only                                                    |
 | List all cached contacts                     | `list_all_contacts`   | cache only                                                    |
-| Contact details (cache + live status / pic)  | `get_contact_details` | `UserInfo`, `IsOnWhatsApp`, `ProfilePictureURL`               |
+| Contact details (cache + live status / pic)  | `get_contact_details` | `GetUserInfo`, `IsOnWhatsApp`, `GetProfilePictureInfo` (URL field only) |
 | Any recipient → readable identity            | `resolve_jid`         | cache only (`GetGroupInfo` only for an unnamed group)         |
 | Authoritative group metadata                 | `get_group_info`      | `GetGroupInfo`                                                |
 | Send text message                            | `send_message`        | `SendMessage` (text only)                                     |
 | Download a message attachment                | `download_media`      | `DownloadMediaWithPath`, `Download` (URL fallback)            |
 | Start a pair flow                            | `pairing_start`       | `StartPairing`, `PairPhone`                                   |
 | Poll an in-progress pair flow                | `pairing_complete`    | `PairWaitNext` / `PairLatest`                                 |
+| Reconcile the cache against the server       | `cache_sync`          | `GetJoinedGroups`, `GetSubscribedNewsletters`, `FetchAppState` |
 
 ### Cache ingestion (no tool — runs from the dispatcher)
 
@@ -88,7 +90,10 @@ are MCP tools (`pairing_start`, `pairing_complete`, `ping`).
 The list below is exhaustive over `whatsmeow.Client` exported methods that
 take user-meaningful action (excluding internal protocol helpers, build-only
 helpers, decrypt/encrypt, retry plumbing, network/proxy setters). ⭐ marks
-the highest user-value gaps.
+the highest user-value gaps. A ✅ row is a method the code **already calls** —
+it stays listed here only because the capability is partially exposed (no
+dedicated tool, or only part of the response surfaced). Everything unmarked
+is genuinely uncalled.
 
 ### Outbound messaging (beyond plain text)
 
@@ -112,7 +117,7 @@ the highest user-value gaps.
 | ---------------------------------------- | ---------------------------------------------------------------------- |
 | ⭐ `FollowNewsletter`                    | subscribe to a channel by JID.                                         |
 | ⭐ `UnfollowNewsletter`                  | unsubscribe.                                                           |
-| `GetSubscribedNewsletters`               | authoritative list (compare against the cache for reconciliation).     |
+| `GetSubscribedNewsletters`               | ✅ already called by `cache_sync` (`internal/cache/sync.go`) to reconcile cached newsletter chats. No tool returns the raw list. |
 | `GetNewsletterInfo`                      | metadata for a known JID.                                              |
 | `GetNewsletterInfoWithInvite`            | metadata via an invite link.                                           |
 | `GetNewsletterMessages`                  | fetch messages directly from the channel feed.                         |
@@ -131,7 +136,7 @@ the highest user-value gaps.
 | ⭐ `LeaveGroup`                                        | leave a group.                                         |
 | ⭐ `JoinGroupWithLink`                                 | accept an invite link.                                 |
 | ⭐ `JoinGroupWithInvite`                               | accept an admin-generated invite.                      |
-| `GetJoinedGroups`                                      | authoritative groups list (vs. cache).                 |
+| `GetJoinedGroups`                                      | ✅ already called by `cache_sync` (`internal/cache/sync.go`) to reconcile cached group / community chats. No tool returns the raw list. |
 | `CreateGroup`                                          | create a new group.                                    |
 | `UpdateGroupParticipants`                              | add / remove / promote / demote.                       |
 | `SetGroupName`, `SetGroupTopic`, `SetGroupDescription` | metadata edits.                                        |
@@ -166,7 +171,7 @@ the highest user-value gaps.
 | ------------------------------------ | ----------------------------------------------------------- |
 | `GetBusinessProfile`                 | richer business metadata than `get_contact_details`.        |
 | `GetUserDevices` / `GetUserDevicesContext` | list paired devices for a JID.                        |
-| `GetProfilePictureInfo`              | full picture metadata (we only expose the URL today).       |
+| `GetProfilePictureInfo` — full metadata | ✅ the call itself already backs `get_contact_details` (`internal/wa/lookups.go`), but only the `URL` field is surfaced; ID, type, and direct path are dropped. |
 | `ResolveBusinessMessageLink`         | resolve a `wa.me/message/...` link.                         |
 | `ResolveContactQRLink`               | resolve a contact QR / link.                                |
 | `GetContactQRLink`                   | your own contact-share link.                                |
@@ -191,7 +196,7 @@ the highest user-value gaps.
 | whatsmeow                                          | Notes                                                                  |
 | -------------------------------------------------- | ---------------------------------------------------------------------- |
 | `BuildHistorySyncRequest` + `SendPeerMessage`      | peer-driven backfill from your phone — useful for extending known-chat history backward. Whatsmeow can't bootstrap an empty cache via this path. |
-| `FetchAppState`                                    | full re-sync of app state (chats list, contacts, settings, mute, archive, pin). Could power a "reconcile cache" tool.   |
+| `FetchAppState`                                    | ✅ already called by `cache_sync`'s `app_state` stage (`internal/cache/sync.go`) for the regular / regular-low / regular-high / critical-unblock-low patches. The resulting events are ingested; the `CriticalBlock` patch is skipped (blocklist is not cached). |
 | `SendAppState`                                     | advanced; mirror local state to the WhatsApp server (e.g. mark a chat read across devices). |
 
 ### Lifecycle / connection
@@ -200,7 +205,7 @@ the highest user-value gaps.
 | ----------------------------------------------- | ------------------------------------------------------------------------------ |
 | `Connect` / `ConnectContext` / `Disconnect`     | manual reconnect control. Indirectly driven by pairing today.                  |
 | `IsConnected` / `IsLoggedIn`                    | low-level state probes (we expose `Status` instead, which is richer).          |
-| `Logout`                                        | no tool. The `POST /admin/unpair` endpoint that used to expose it was removed in `99b0ce7`. |
+| `Logout`                                        | no tool. The `POST /admin/unpair` endpoint that used to expose it was removed in `99b0ce7`. Not dead code: it is still called internally as the best-effort server-side logout when re-pairing tears down an old session (`internal/wa/admin_ops.go`). |
 | `ResetConnection`                               | force-reset the websocket.                                                     |
 | `WaitForConnection`                             | block until connected.                                                         |
 

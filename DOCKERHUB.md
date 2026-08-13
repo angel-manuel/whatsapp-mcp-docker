@@ -5,7 +5,7 @@ server for AI agents (Claude Code, Cursor, any MCP HTTP client). Pull the
 image, run it, and your agent pairs the phone and controls WhatsApp — all
 through MCP.
 
-Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 20
+Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 21
 MCP tools today (cache-backed chat / message reads, contact and group
 lookup, `send_message`, `download_media`, `ping`, `cache_sync` /
 `cache_sync_status`, plus native `pairing_start` /
@@ -23,7 +23,7 @@ Source, full docs, and changelog:
 | Tag | Base | Use when |
 |---|---|---|
 | `latest` | distroless/static, non-root, no shell | **Default.** Smallest, hardest to misuse. |
-| `latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You need `send_audio_message` to transcode arbitrary input to Opus, or want a shell for triage. |
+| `latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You want a shell for triage. `ffmpeg` is shipped ahead of the audio-send path (transcoding arbitrary input to Opus); no tool invokes it today. |
 | `X.Y.Z`, `X.Y.Z-slim` | (as above) | Immutable per-release pins (no `v` prefix — Docker tag convention). **Pin by digest in production.** |
 
 Both variants are multi-arch: `linux/amd64`, `linux/arm64`.
