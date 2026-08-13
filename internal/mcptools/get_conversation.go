@@ -190,6 +190,9 @@ LIMIT ? OFFSET ?`, messageSenderNameColumns, strings.Join(wheres, " AND "))
 	if err := rows.Err(); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return mcp.InternalError(fmt.Sprintf("get_conversation rows: %v", err)), nil
 	}
+	if err := attachReactions(ctx, store, out.Messages); err != nil {
+		return mcp.InternalError(fmt.Sprintf("get_conversation reactions: %v", err)), nil
+	}
 	return out, nil
 }
 

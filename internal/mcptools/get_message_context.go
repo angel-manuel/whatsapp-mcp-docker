@@ -187,6 +187,19 @@ LIMIT ?`, chatJID, ts, ts, in.MessageID, after)
 		out.After = dtos
 	}
 
+	// One batched lookup across the whole window (target included) rather than
+	// three; attachReactions de-duplicates the pairs itself.
+	all := make([]MessageDTO, 0, 1+len(out.Before)+len(out.After))
+	all = append(all, out.Message)
+	all = append(all, out.Before...)
+	all = append(all, out.After...)
+	if err := attachReactions(ctx, store, all); err != nil {
+		return mcp.InternalError(fmt.Sprintf("get_message_context reactions: %v", err)), nil
+	}
+	out.Message = all[0]
+	copy(out.Before, all[1:1+len(out.Before)])
+	copy(out.After, all[1+len(out.Before):])
+
 	return out, nil
 }
 

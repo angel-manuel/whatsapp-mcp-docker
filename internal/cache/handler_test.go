@@ -9,7 +9,9 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -684,5 +686,238 @@ func TestHandleEvent_BumpsLastEventTimestamp(t *testing.T) {
 	})
 	if ingest.LastEventAt().IsZero() {
 		t.Fatalf("expected LastEventAt to advance after a Message event")
+	}
+}
+
+// reactionEvent builds the events.Message envelope WhatsApp delivers for a
+// reaction: the reactor is the envelope's sender, and the key points at the
+// message being reacted to.
+func reactionEvent(chat, sender types.JID, targetID, emoji string, isFromMe bool, senderTS time.Time) *events.Message {
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: isFromMe},
+			ID:            "wamid.REACT-" + targetID + "-" + emoji,
+			Timestamp:     senderTS,
+		},
+		Message: &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+			Key: &waCommon.MessageKey{
+				ID:        proto.String(targetID),
+				RemoteJID: proto.String(chat.String()),
+				FromMe:    proto.Bool(false),
+			},
+			Text:              proto.String(emoji),
+			SenderTimestampMS: proto.Int64(senderTS.UnixMilli()),
+		}},
+	}
+}
+
+func readReactions(t *testing.T, store *Store, chatJID, targetID string) []Reaction {
+	t.Helper()
+	rows, err := store.DB().QueryContext(context.Background(),
+		`SELECT sender_jid, emoji, ts, is_from_me FROM reactions WHERE chat_jid = ? AND target_id = ? ORDER BY sender_jid`,
+		chatJID, targetID)
+	if err != nil {
+		t.Fatalf("query reactions: %v", err)
+	}
+	defer rows.Close()
+	var out []Reaction
+	for rows.Next() {
+		var (
+			r        Reaction
+			ts       int64
+			isFromMe int
+		)
+		if err := rows.Scan(&r.SenderJID, &r.Emoji, &ts, &isFromMe); err != nil {
+			t.Fatalf("scan reaction: %v", err)
+		}
+		r.ChatJID, r.TargetID = chatJID, targetID
+		r.Timestamp = time.Unix(ts, 0).UTC()
+		r.IsFromMe = isFromMe != 0
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reaction rows: %v", err)
+	}
+	return out
+}
+
+func TestHandleEvent_Reaction_PersistsRow(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	ts := time.Unix(1_700_000_100, 0).UTC()
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.TARGET", "👍", false, ts))
+
+	got := readReactions(t, store, chat.String(), "wamid.TARGET")
+	if len(got) != 1 {
+		t.Fatalf("want 1 reaction, got %d", len(got))
+	}
+	if got[0].Emoji != "👍" {
+		t.Errorf("emoji = %q, want 👍", got[0].Emoji)
+	}
+	if got[0].SenderJID != chat.String() {
+		t.Errorf("sender = %q, want %q", got[0].SenderJID, chat.String())
+	}
+	if got[0].IsFromMe {
+		t.Error("is_from_me = true, want false")
+	}
+	if !got[0].Timestamp.Equal(ts) {
+		t.Errorf("ts = %v, want %v (the reaction's own SenderTimestampMS)", got[0].Timestamp, ts)
+	}
+}
+
+func TestHandleEvent_Reaction_ReplacesSameSendersPrevious(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	base := time.Unix(1_700_000_100, 0).UTC()
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.TARGET", "👍", false, base))
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.TARGET", "😂", false, base.Add(time.Minute)))
+
+	got := readReactions(t, store, chat.String(), "wamid.TARGET")
+	if len(got) != 1 {
+		t.Fatalf("want 1 reaction after replacement, got %d", len(got))
+	}
+	if got[0].Emoji != "😂" {
+		t.Errorf("emoji = %q, want 😂", got[0].Emoji)
+	}
+}
+
+func TestHandleEvent_Reaction_StaleTimestampIsIgnored(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	base := time.Unix(1_700_000_100, 0).UTC()
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.TARGET", "😂", false, base))
+	// Out-of-order delivery: an older reaction arriving after a newer one
+	// must not overwrite it.
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.TARGET", "👍", false, base.Add(-time.Minute)))
+
+	got := readReactions(t, store, chat.String(), "wamid.TARGET")
+	if len(got) != 1 {
+		t.Fatalf("want 1 reaction, got %d", len(got))
+	}
+	if got[0].Emoji != "😂" {
+		t.Errorf("emoji = %q, want the newer 😂 to survive", got[0].Emoji)
+	}
+}
+
+func TestHandleEvent_Reaction_EmptyTextRemovesRow(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	base := time.Unix(1_700_000_100, 0).UTC()
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.TARGET", "👍", false, base))
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.TARGET", "", false, base.Add(time.Minute)))
+
+	if got := readReactions(t, store, chat.String(), "wamid.TARGET"); len(got) != 0 {
+		t.Fatalf("want reaction removed, got %d rows: %+v", len(got), got)
+	}
+}
+
+func TestHandleEvent_Reaction_OwnReactionUsesCanonicalEmptySender(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	me := mustParseJID(t, "9999999999@s.whatsapp.net")
+	base := time.Unix(1_700_000_100, 0).UTC()
+	ingest.HandleEvent(reactionEvent(chat, me, "wamid.TARGET", "👍", true, base))
+
+	got := readReactions(t, store, chat.String(), "wamid.TARGET")
+	if len(got) != 1 {
+		t.Fatalf("want 1 reaction, got %d", len(got))
+	}
+	if got[0].SenderJID != "" {
+		t.Errorf("sender = %q, want the canonical empty sender for our own reaction", got[0].SenderJID)
+	}
+	if !got[0].IsFromMe {
+		t.Error("is_from_me = false, want true")
+	}
+}
+
+func TestHandleEvent_Reaction_DoesNotTouchChat(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	msgTS := time.Unix(1_700_000_000, 0).UTC()
+	ingest.HandleEvent(&events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: chat},
+			ID:            "wamid.TARGET",
+			Timestamp:     msgTS,
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello")},
+	})
+
+	// A reaction arriving much later must not bump the chat, or list_chats
+	// would reorder and report the reaction as the chat's last message.
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.TARGET", "👍", false, msgTS.Add(time.Hour)))
+
+	var lastTS int64
+	if err := store.DB().QueryRowContext(context.Background(),
+		`SELECT last_message_ts FROM chats WHERE jid = ?`, chat.String()).Scan(&lastTS); err != nil {
+		t.Fatalf("scan chat: %v", err)
+	}
+	if lastTS != msgTS.Unix() {
+		t.Errorf("last_message_ts = %d, want %d (unchanged by the reaction)", lastTS, msgTS.Unix())
+	}
+}
+
+func TestHandleEvent_Reaction_TargetNeedNotBeCached(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+
+	chat := mustParseJID(t, "1234567890@s.whatsapp.net")
+	ts := time.Unix(1_700_000_100, 0).UTC()
+	ingest.HandleEvent(reactionEvent(chat, chat, "wamid.NEVER-SEEN", "👍", false, ts))
+
+	// The reaction is kept so it surfaces once the target is backfilled.
+	if got := readReactions(t, store, chat.String(), "wamid.NEVER-SEEN"); len(got) != 1 {
+		t.Fatalf("want the reaction kept for an uncached target, got %d rows", len(got))
+	}
+}
+
+func TestHandleEvent_HistorySync_BackfillsReactions(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+
+	chat := mustParseJID(t, "120363000000000000@g.us")
+	participant := "1112223333@s.whatsapp.net"
+	msgTS := uint64(1_700_000_000)
+
+	ingest.HandleEvent(&events.HistorySync{Data: &waHistorySync.HistorySync{
+		Conversations: []*waHistorySync.Conversation{{
+			ID: proto.String(chat.String()),
+			Messages: []*waHistorySync.HistorySyncMsg{{
+				Message: &waWeb.WebMessageInfo{
+					Key: &waCommon.MessageKey{
+						ID:          proto.String("wamid.OLD"),
+						RemoteJID:   proto.String(chat.String()),
+						FromMe:      proto.Bool(false),
+						Participant: proto.String(participant),
+					},
+					MessageTimestamp: proto.Uint64(msgTS),
+					Message:          &waE2E.Message{Conversation: proto.String("old message")},
+					Reactions: []*waWeb.Reaction{{
+						Key: &waCommon.MessageKey{
+							ID:          proto.String("wamid.OLD-REACT"),
+							Participant: proto.String(participant),
+							FromMe:      proto.Bool(false),
+						},
+						Text:              proto.String("🎉"),
+						SenderTimestampMS: proto.Int64(int64(msgTS) * 1000),
+					}},
+				},
+			}},
+		}},
+	}})
+
+	got := readReactions(t, store, chat.String(), "wamid.OLD")
+	if len(got) != 1 {
+		t.Fatalf("want 1 backfilled reaction, got %d", len(got))
+	}
+	if got[0].Emoji != "🎉" {
+		t.Errorf("emoji = %q, want 🎉", got[0].Emoji)
+	}
+	if got[0].SenderJID != participant {
+		t.Errorf("sender = %q, want %q", got[0].SenderJID, participant)
 	}
 }

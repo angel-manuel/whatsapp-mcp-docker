@@ -52,6 +52,9 @@ type ConversationDTO struct {
 //     has no delivery columns), so this is currently always "unknown" — a
 //     truthful stub, never an invented checkmark. When receipt ingestion
 //     lands, this field carries the real ack level.
+//   - Reactions: the emoji reactions currently on the message, so "they
+//     thumbs-upped it" is data rather than something the caller infers. Omitted
+//     from the JSON entirely when there are none, which is the common case.
 type MessageDTO struct {
 	ID             string `json:"id"`
 	ChatJID        string `json:"chat_jid"`
@@ -66,6 +69,23 @@ type MessageDTO struct {
 	MediaType      any    `json:"media_type"`      // string | null
 	Filename       any    `json:"filename,omitempty"`
 	FileLength     any    `json:"file_length,omitempty"`
+	// Reactions is omitted when empty so messages without reactions keep
+	// exactly the payload they had before reactions were supported.
+	Reactions []ReactionDTO `json:"reactions,omitempty"`
+}
+
+// ReactionDTO is one emoji reaction on a message. WhatsApp allows a single
+// reaction per person per message, so each entry is a distinct reactor.
+//
+// Our own reaction is reported with an empty Sender and IsFromMe true: the
+// cache stores it under a canonical empty sender key so that the live,
+// history-sync, and send_reaction paths cannot produce duplicate rows (see
+// cache.ReactionSenderKey).
+type ReactionDTO struct {
+	Emoji      string `json:"emoji"`
+	Sender     string `json:"sender"`
+	SenderName any    `json:"sender_name"` // string | null
+	IsFromMe   bool   `json:"is_from_me"`
 }
 
 // JSON schema fragments shared across tools. Kept as raw strings so the
@@ -121,7 +141,14 @@ const messageSchemaFragment = `{
     "delivery_status": {"type": "string", "enum": ["sent","delivered","read","unknown"], "description": "WhatsApp ack level. Currently always 'unknown' until the cache ingests receipt/ack stanzas; never an inferred value."},
     "media_type":      {"type": ["string","null"]},
     "filename":        {"type": ["string","null"]},
-    "file_length":     {"type": ["integer","null"]}
+    "file_length":     {"type": ["integer","null"]},
+    "reactions":       {"type": "array", "description": "Emoji reactions currently on this message; absent when there are none. Your own reaction has is_from_me true and an empty sender.",
+                        "items": {"type": "object",
+                                  "properties": {"emoji":       {"type": "string"},
+                                                 "sender":      {"type": "string"},
+                                                 "sender_name": {"type": ["string","null"]},
+                                                 "is_from_me":  {"type": "boolean"}},
+                                  "required": ["emoji","sender","is_from_me"]}}
   },
   "required": ["id","chat_jid","sender","content","is_from_me","direction","delivery_status"]
 }`
