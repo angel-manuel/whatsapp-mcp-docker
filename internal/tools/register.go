@@ -80,6 +80,13 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			Handler:     getPollResults(deps),
 		},
 		{
+			Name: "send_reaction",
+			Description: "React to a WhatsApp message with an emoji. An empty emoji removes your reaction; a new one replaces it (WhatsApp allows one reaction per person per message). " +
+				"The target message's author is resolved from the local cache; pass sender_jid when it is not cached. Newsletter/channel messages are not supported.",
+			InputSchema: sendReactionSchema,
+			Handler:     sendReaction(deps),
+		},
+		{
 			Name:        "pairing_start",
 			Description: "Start a WhatsApp pair flow and return the first rotating QR payload. Pass `phone` to also obtain a phone-number linking code. Exempt from the not_paired gate.",
 			InputSchema: pairingStartSchema,

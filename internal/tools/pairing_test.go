@@ -54,6 +54,9 @@ func (f *fakeWA) ProfilePictureURL(context.Context, types.JID) (string, error) {
 func (f *fakeWA) SendMessage(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error) {
 	return whatsmeow.SendResponse{}, nil
 }
+func (f *fakeWA) BuildReaction(types.JID, types.JID, types.MessageID, string) *waE2E.Message {
+	return nil
+}
 func (f *fakeWA) OwnJID() types.JID { return types.JID{} }
 
 func (f *fakeWA) BuildPollCreation(string, []string, int) (*waE2E.Message, error) {

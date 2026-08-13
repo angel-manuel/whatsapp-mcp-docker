@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -175,6 +176,25 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 		}
 	}
 
+	// Reactions target an existing message rather than inserting a new row,
+	// and must not touch the chat: bumping last_message_ts would reorder the
+	// chat list and make list_chats report the reaction as the last message.
+	if react := evt.Message.GetReactionMessage(); react != nil {
+		i.handleReaction(ctx, evt, react, ts)
+		return
+	}
+
+	// A poll update is a vote, not a message: it has no body and never appears
+	// in a chat transcript, so like a reaction it must not bump the chat's
+	// last_message_ts. Unlike a reaction it does record who sent it — the
+	// tally names its voters, and a group member who votes without ever having
+	// sent a message would otherwise be unnameable.
+	if vote := evt.Message.GetPollUpdateMessage(); vote != nil {
+		i.recordSenderIdentity(ctx, evt)
+		i.handlePollVote(ctx, evt, vote)
+		return
+	}
+
 	if err := i.store.UpsertChat(ctx, Chat{
 		JID:           chatJID,
 		IsGroup:       evt.Info.IsGroup,
@@ -183,32 +203,7 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 		i.logger.Warn("cache: upsert chat", slog.String("chat_jid", chatJID), slog.String("err", err.Error()))
 	}
 
-	if senderJID != "" && !evt.Info.IsFromMe {
-		contact := Contact{JID: senderJID, PushName: evt.Info.PushName}
-		if evt.Info.VerifiedName != nil && evt.Info.VerifiedName.Details != nil {
-			contact.BusinessName = evt.Info.VerifiedName.Details.GetVerifiedName()
-		}
-		if err := i.store.UpsertContact(ctx, contact); err != nil {
-			i.logger.Warn("cache: upsert contact", slog.String("jid", senderJID), slog.String("err", err.Error()))
-		}
-	}
-
-	// whatsmeow attaches the sender's alternate address (the LID when Sender
-	// is the phone JID, and vice-versa). Record the pairing so the read side
-	// can merge a contact's split phone/LID threads (see get_conversation).
-	i.recordJIDAlias(ctx, evt.Info.Sender, evt.Info.SenderAlt)
-
-	// A poll update is a vote, not a message: it has no body, never appears in
-	// a chat transcript, and targets the poll creation message by id, so it is
-	// recorded in the poll tables instead of the messages table. It is handled
-	// here rather than at the top of the function so a vote still contributes
-	// the chat, contact and lid<->phone alias facts above — a group member who
-	// votes without ever having sent a message is otherwise unnameable, which
-	// is exactly what get_poll_results needs those facts for.
-	if vote := evt.Message.GetPollUpdateMessage(); vote != nil {
-		i.handlePollVote(ctx, evt, vote)
-		return
-	}
+	i.recordSenderIdentity(ctx, evt)
 
 	msg := buildMessageRow(chatJID, senderJID, evt.Info.ID, evt.Info.PushName, ts, evt.Info.IsFromMe, evt.Message)
 	if msg == nil {
@@ -220,6 +215,93 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 	}
 
 	i.persistPollCreation(ctx, chatJID, senderJID, evt.Info.ID, ts, evt.Info.IsFromMe, evt.Message)
+}
+
+// handleReaction persists an emoji reaction carried in a ReactionMessage
+// envelope. An empty Text is WhatsApp's "remove my reaction" signal, so it
+// deletes the row instead of storing an empty emoji.
+//
+// The reactor's contact and lid<->phone alias are recorded exactly as they are
+// on the message path, since a reaction is often the first (or only) thing a
+// given identity sends us. The chat row is deliberately left alone — see the
+// call site in handleMessage.
+func (i *Ingestor) handleReaction(ctx context.Context, evt *events.Message, react *waE2E.ReactionMessage, fallbackTS time.Time) {
+	key := react.GetKey()
+	if key == nil || key.GetID() == "" {
+		return
+	}
+	chatJID := evt.Info.Chat.String()
+	if remote := key.GetRemoteJID(); remote != "" {
+		chatJID = remote
+	}
+	senderJID := evt.Info.Sender.ToNonAD().String()
+
+	if senderJID != "" && !evt.Info.IsFromMe {
+		if err := i.store.UpsertContact(ctx, Contact{JID: senderJID, PushName: evt.Info.PushName}); err != nil {
+			i.logger.Warn("cache: upsert reaction contact", slog.String("jid", senderJID), slog.String("err", err.Error()))
+		}
+	}
+	i.recordJIDAlias(ctx, evt.Info.Sender, evt.Info.SenderAlt)
+
+	// The reaction carries its own timestamp, which is what orders competing
+	// reactions from the same sender; the envelope time is only a fallback.
+	ts := fallbackTS
+	if ms := react.GetSenderTimestampMS(); ms > 0 {
+		ts = time.UnixMilli(ms)
+	}
+
+	i.persistReaction(ctx, Reaction{
+		ChatJID:   chatJID,
+		TargetID:  key.GetID(),
+		SenderJID: senderJID,
+		Emoji:     react.GetText(),
+		Timestamp: ts,
+		IsFromMe:  evt.Info.IsFromMe,
+	})
+}
+
+// persistReaction writes one reaction row, routing the empty-emoji removal to
+// a delete. Shared by the live and history-sync ingest paths; failures are
+// logged and swallowed like every other ingest write.
+func (i *Ingestor) persistReaction(ctx context.Context, r Reaction) {
+	if r.ChatJID == "" || r.TargetID == "" {
+		return
+	}
+	if r.Emoji == "" {
+		if err := i.store.DeleteReaction(ctx, r.ChatJID, r.TargetID, ReactionSenderKey(r.SenderJID, r.IsFromMe)); err != nil {
+			i.logger.Warn("cache: delete reaction",
+				slog.String("chat_jid", r.ChatJID), slog.String("target_id", r.TargetID), slog.String("err", err.Error()))
+		}
+		return
+	}
+	if err := i.store.UpsertReaction(ctx, r); err != nil {
+		i.logger.Warn("cache: upsert reaction",
+			slog.String("chat_jid", r.ChatJID), slog.String("target_id", r.TargetID), slog.String("err", err.Error()))
+	}
+}
+
+// recordSenderIdentity persists what an inbound stanza reveals about who sent
+// it: the sender's contact row (push name, verified business name) and the
+// lid<->phone pairing whatsmeow attaches as the alternate address.
+//
+// It is deliberately separate from the chat upsert so that stanzas which must
+// not reorder the chat list — a poll vote, say — can still contribute the
+// identity facts the read side needs to name people.
+func (i *Ingestor) recordSenderIdentity(ctx context.Context, evt *events.Message) {
+	senderJID := evt.Info.Sender.ToNonAD().String()
+	if senderJID != "" && !evt.Info.IsFromMe {
+		contact := Contact{JID: senderJID, PushName: evt.Info.PushName}
+		if evt.Info.VerifiedName != nil && evt.Info.VerifiedName.Details != nil {
+			contact.BusinessName = evt.Info.VerifiedName.Details.GetVerifiedName()
+		}
+		if err := i.store.UpsertContact(ctx, contact); err != nil {
+			i.logger.Warn("cache: upsert contact", slog.String("jid", senderJID), slog.String("err", err.Error()))
+		}
+	}
+	// whatsmeow attaches the sender's alternate address (the LID when Sender
+	// is the phone JID, and vice-versa). Record the pairing so the read side
+	// can merge a contact's split phone/LID threads (see get_conversation).
+	i.recordJIDAlias(ctx, evt.Info.Sender, evt.Info.SenderAlt)
 }
 
 // recordJIDAlias persists the link between a contact's phone-number JID and
@@ -318,15 +400,20 @@ func (i *Ingestor) handleHistorySync(ctx context.Context, evt *events.HistorySyn
 			} else {
 				senderJID = chatJIDStr
 			}
-			row := buildMessageRow(chatJIDStr, senderJID, key.GetID(), web.GetPushName(), rowTS, key.GetFromMe(), web.GetMessage())
-			if row == nil {
-				continue
+			// A nil row means an envelope kind we don't surface. Its
+			// reactions are still worth keeping, so they are ingested
+			// below regardless.
+			if row := buildMessageRow(chatJIDStr, senderJID, key.GetID(), web.GetPushName(), rowTS, key.GetFromMe(), web.GetMessage()); row != nil {
+				if err := i.store.InsertMessage(ctx, *row); err != nil {
+					i.logger.Warn("cache: history insert message",
+						slog.String("chat_jid", chatJIDStr), slog.String("message_id", key.GetID()), slog.String("err", err.Error()))
+				}
 			}
-			if err := i.store.InsertMessage(ctx, *row); err != nil {
-				i.logger.Warn("cache: history insert message",
-					slog.String("chat_jid", chatJIDStr), slog.String("message_id", key.GetID()), slog.String("err", err.Error()))
-			}
+			// Both of these are independent of the row above: a poll's ballot
+			// and a message's reactions are worth keeping even for an
+			// envelope kind we don't surface as a message.
 			i.persistPollCreation(ctx, chatJIDStr, senderJID, key.GetID(), rowTS, key.GetFromMe(), web.GetMessage())
+			i.ingestHistoryReactions(ctx, chatJIDStr, key.GetID(), rowTS, web.GetReactions())
 		}
 
 		chat := Chat{JID: chatJIDStr, IsGroup: chatJID.Server == types.GroupServer, LastMessageTS: latestTS}
@@ -341,6 +428,45 @@ func (i *Ingestor) handleHistorySync(ctx context.Context, evt *events.HistorySyn
 		if err := i.store.UpsertChat(ctx, chat); err != nil {
 			i.logger.Warn("cache: history upsert chat", slog.String("chat_jid", chatJIDStr), slog.String("err", err.Error()))
 		}
+	}
+}
+
+// ingestHistoryReactions persists the reactions history sync attaches to a
+// message. Unlike a live ReactionMessage — where the envelope's own sender is
+// the reactor — here each reaction carries its own key, and the *enclosing*
+// message id is the target.
+func (i *Ingestor) ingestHistoryReactions(ctx context.Context, chatJID, targetID string, fallbackTS time.Time, reactions []*waWeb.Reaction) {
+	for _, react := range reactions {
+		if react == nil {
+			continue
+		}
+		key := react.GetKey()
+		if key == nil {
+			continue
+		}
+		senderJID := ""
+		if part := key.GetParticipant(); part != "" {
+			if pj, err := types.ParseJID(part); err == nil {
+				senderJID = pj.ToNonAD().String()
+			} else {
+				senderJID = part
+			}
+		} else if !key.GetFromMe() {
+			// A 1:1 chat carries no participant; the other party is the chat.
+			senderJID = chatJID
+		}
+		ts := fallbackTS
+		if ms := react.GetSenderTimestampMS(); ms > 0 {
+			ts = time.UnixMilli(ms)
+		}
+		i.persistReaction(ctx, Reaction{
+			ChatJID:   chatJID,
+			TargetID:  targetID,
+			SenderJID: senderJID,
+			Emoji:     react.GetText(),
+			Timestamp: ts,
+			IsFromMe:  key.GetFromMe(),
+		})
 	}
 }
 

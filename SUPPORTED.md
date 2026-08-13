@@ -39,6 +39,7 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Any recipient → readable identity            | `resolve_jid`         | cache only (`GetGroupInfo` only for an unnamed group)         |
 | Authoritative group metadata                 | `get_group_info`      | `GetGroupInfo`                                                |
 | Send text message                            | `send_message`        | `SendMessage` (text only)                                     |
+| React to a message with an emoji             | `send_reaction`       | `BuildReaction` + `SendMessage`                               |
 | Create a poll                                | `send_poll`           | `BuildPollCreation` + `SendMessage` (+ `PutMessageSecret`, so votes on our own poll stay readable) |
 | Vote on / withdraw from a poll               | `vote_poll`           | `BuildPollVote` + `SendMessage`                               |
 | Read a poll's tally                          | `get_poll_results`    | cache only (votes accumulated from `DecryptPollVote`)         |
@@ -67,8 +68,8 @@ events arrive.
 | `*events.Pin`               | pinned flag                                    |
 | `*events.Archive`           | archived flag                                  |
 | `*events.Star`              | chat row only (no `messages.starred` yet)      |
-| `*events.Message` (poll creation) | `poll` message row + `polls` / `poll_options` ballot (migration `005`) |
-| `*events.Message` (poll update)   | decrypted via `DecryptPollVote` into `poll_votes` (migration `005`); no message row |
+| `*events.Message` (poll creation) | `poll` message row + `polls` / `poll_options` ballot (migration `006`) |
+| `*events.Message` (poll update)   | decrypted via `DecryptPollVote` into `poll_votes` (migration `006`); no message row |
 
 Poll tallies are accumulated here and nowhere else. Neither whatsmeow nor the
 WhatsApp protocol offers a way to ask the server for a poll's current
@@ -77,6 +78,15 @@ are never replayed. `get_poll_results` therefore reports what this device
 observed — votes cast before pairing, or while the container was down, are
 gone. A vote whose poll secret whatsmeow never held cannot be decrypted at
 all; it is logged and dropped, since nothing about it is recoverable later.
+
+A `*events.Message` carrying a `ReactionMessage` is persisted to the `reactions`
+table (migration `005`) rather than as a message row, keyed by
+`(chat_jid, target_id, sender_jid)` — WhatsApp allows one reaction per person
+per message, a new emoji replaces it, and an empty emoji removes it. Reactions
+deliberately do not bump `chats.last_message_ts`. `*events.HistorySync` also
+backfills the reactions attached to each synced message. Our own reactions are
+stored under a canonical empty sender so the live, history-sync, and
+`send_reaction` paths cannot produce duplicate rows.
 
 Media envelopes additionally persist `media_direct_path` (migration `004`),
 which is what `download_media` needs to re-request the CDN object after the
@@ -113,7 +123,6 @@ is genuinely uncalled.
 | whatsmeow                                           | Notes                                                              |
 | --------------------------------------------------- | ------------------------------------------------------------------ |
 | ⭐ `SendMessage` for media envelopes                | image/video/audio/document/sticker. Today only text is supported. |
-| ⭐ `BuildReaction` + `SendMessage`                  | react with an emoji.                                               |
 | ⭐ `RevokeMessage` (`BuildRevoke` + send)           | delete-for-everyone.                                               |
 | ⭐ `BuildEdit` + `SendMessage`                      | edit a previously sent message.                                    |
 | `MarkRead`                                          | send read receipts.                                                |
@@ -135,7 +144,7 @@ is genuinely uncalled.
 | `GetNewsletterMessages`                  | fetch messages directly from the channel feed.                         |
 | `GetNewsletterMessageUpdates`            | poll for updates.                                                      |
 | `NewsletterMarkViewed`                   | mark a newsletter message as viewed.                                   |
-| `NewsletterSendReaction`                 | react to a newsletter message.                                         |
+| `NewsletterSendReaction`                 | react to a newsletter message. `send_reaction` rejects `@newsletter` targets: this needs a `MessageServerID` the cache does not capture. |
 | `NewsletterToggleMute`                   | mute/unmute.                                                           |
 | `NewsletterSubscribeLiveUpdates`         | live-mode subscription.                                                |
 | `CreateNewsletter`                       | author your own channel.                                               |

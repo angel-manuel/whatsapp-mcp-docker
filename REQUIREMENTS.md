@@ -138,7 +138,7 @@ Until pairing succeeds, every MCP tool call MUST return a structured error with 
 
 - `/data` is the only persistent volume; nuke it to fully reset the device identity.
 - `whatsmeow` is configured with its SQLite `sqlstore` pointed at `/data/session.db`. Ratchet state rotates on every message, so only one process may own the volume at a time — the binary acquires an exclusive `flock` on `/data/.lock` at startup and exits non-zero if it is already held.
-- The cache DB at `/data/cache.db` stores the same entities Felix's reference ships: chats, messages, contacts, nicknames, FTS index over message text. It additionally stores poll ballots and votes (`polls`, `poll_options`, `poll_votes`, migration `005`), which have no reference equivalent because poll tallies exist nowhere else — see `get_poll_results` in CHANGES.md. Schema documented in `docs/schema.md`.
+- The cache DB at `/data/cache.db` stores the same entities Felix's reference ships: chats, messages, contacts, nicknames, FTS index over message text. It additionally stores poll ballots and votes (`polls`, `poll_options`, `poll_votes`, migration `006`), which have no reference equivalent because poll tallies exist nowhere else — see `get_poll_results` in CHANGES.md. Schema documented in `docs/schema.md`.
 
 ## Session lifecycle events
 

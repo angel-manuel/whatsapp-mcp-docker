@@ -201,3 +201,101 @@ func TestUpsertNickname_RoundTripAndDelete(t *testing.T) {
 		t.Fatalf("nickname not deleted, count = %d", count)
 	}
 }
+
+func TestUpsertReaction_ReplacesAndDeletes(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	base := time.Unix(1_700_000_000, 0).UTC()
+	r := Reaction{ChatJID: "c@s", TargetID: "m1", SenderJID: "u@s", Emoji: "👍", Timestamp: base}
+	if err := store.UpsertReaction(ctx, r); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	r.Emoji, r.Timestamp = "😂", base.Add(time.Minute)
+	if err := store.UpsertReaction(ctx, r); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	var emoji string
+	var count int
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*), MAX(emoji) FROM reactions WHERE chat_jid = ? AND target_id = ?`,
+		"c@s", "m1").Scan(&count, &emoji); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if count != 1 || emoji != "😂" {
+		t.Fatalf("got count=%d emoji=%q, want 1 / 😂", count, emoji)
+	}
+
+	// An older reaction must not overwrite a newer one.
+	r.Emoji, r.Timestamp = "😢", base.Add(-time.Minute)
+	if err := store.UpsertReaction(ctx, r); err != nil {
+		t.Fatalf("stale upsert: %v", err)
+	}
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT emoji FROM reactions WHERE chat_jid = ? AND target_id = ?`, "c@s", "m1").Scan(&emoji); err != nil {
+		t.Fatalf("scan after stale: %v", err)
+	}
+	if emoji != "😂" {
+		t.Fatalf("emoji = %q, want the newer 😂 to survive", emoji)
+	}
+
+	if err := store.DeleteReaction(ctx, "c@s", "m1", "u@s"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM reactions WHERE chat_jid = ? AND target_id = ?`, "c@s", "m1").Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("reaction not deleted, count = %d", count)
+	}
+	// Removing an absent reaction is not an error — WhatsApp re-delivers them.
+	if err := store.DeleteReaction(ctx, "c@s", "m1", "u@s"); err != nil {
+		t.Fatalf("idempotent delete: %v", err)
+	}
+}
+
+func TestUpsertReaction_RejectsEmptyEmoji(t *testing.T) {
+	store := newTestStore(t)
+	err := store.UpsertReaction(context.Background(), Reaction{ChatJID: "c@s", TargetID: "m1", SenderJID: "u@s"})
+	if err == nil {
+		t.Fatal("want an error for an empty emoji (removals go through DeleteReaction)")
+	}
+}
+
+func TestGetMessageSender_ReportsAuthorAndDirection(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	ts := time.Unix(1_700_000_000, 0).UTC()
+	if err := store.InsertMessage(ctx, Message{
+		ID: "m1", ChatJID: "g@g.us", SenderJID: "u@s", Timestamp: ts, Kind: KindText, Body: "hi",
+	}); err != nil {
+		t.Fatalf("insert theirs: %v", err)
+	}
+	if err := store.InsertMessage(ctx, Message{
+		ID: "m2", ChatJID: "g@g.us", SenderJID: "me@s", Timestamp: ts, Kind: KindText, Body: "yo", IsFromMe: true,
+	}); err != nil {
+		t.Fatalf("insert mine: %v", err)
+	}
+
+	sender, isFromMe, err := store.GetMessageSender(ctx, "g@g.us", "m1")
+	if err != nil {
+		t.Fatalf("theirs: %v", err)
+	}
+	if sender != "u@s" || isFromMe {
+		t.Errorf("got sender=%q isFromMe=%v, want u@s / false", sender, isFromMe)
+	}
+
+	if _, isFromMe, err = store.GetMessageSender(ctx, "g@g.us", "m2"); err != nil {
+		t.Fatalf("mine: %v", err)
+	}
+	if !isFromMe {
+		t.Error("isFromMe = false for our own message, want true")
+	}
+
+	if _, _, err := store.GetMessageSender(ctx, "g@g.us", "nope"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing message: got %v, want sql.ErrNoRows", err)
+	}
+}

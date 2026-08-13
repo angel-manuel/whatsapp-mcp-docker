@@ -266,6 +266,36 @@ SELECT chat_jid, id, kind, ts, media_mime, media_filename, media_url, media_dire
 	return out, nil
 }
 
+// GetMessageSender returns the author of the message identified by
+// (chatJID, id) — the sender JID together with whether we are that sender.
+// Returns sql.ErrNoRows when no such message is cached.
+//
+// send_reaction needs this because whatsmeow's BuildReaction keys the reaction
+// off the *target message's* author, not the reactor: passing our own JID for
+// someone else's message builds a FromMe key and misattributes the reaction.
+func (s *Store) GetMessageSender(ctx context.Context, chatJID, id string) (string, bool, error) {
+	if chatJID == "" || id == "" {
+		return "", false, errors.New("cache: GetMessageSender: chatJID and id required")
+	}
+	var (
+		sender   string
+		isFromMe int
+	)
+	err := s.db.QueryRowContext(ctx, `
+SELECT sender_jid, is_from_me
+  FROM messages
+ WHERE chat_jid = ? AND id = ?
+ LIMIT 1
+`, chatJID, id).Scan(&sender, &isFromMe)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, sql.ErrNoRows
+		}
+		return "", false, fmt.Errorf("cache: get message sender %s/%s: %w", chatJID, id, err)
+	}
+	return sender, isFromMe != 0, nil
+}
+
 // ResolveLinkedJIDs returns jid together with every other identity linked to
 // it through jid_aliases — i.e. a contact's phone-number JID and privacy LID.
 // The input jid is always returned first (and only once); linked identities

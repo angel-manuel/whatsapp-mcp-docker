@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.5.1...v0.6.0) (2026-08-11)
+
+
+### Features
+
+* **tools:** add resolve_jid and follow jid_aliases in get_contact_details ([58fbfac](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/58fbfac7b398b5548a8506ec4ec406088f09654a))
+* **tools:** add resolve_jid and follow jid_aliases in get_contact_details ([5485071](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/54850710600ea53caf80315ec992014268f0d698))
+
 ## [0.5.1](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.5.0...v0.5.1) (2026-08-05)
 
 

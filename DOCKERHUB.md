@@ -5,10 +5,10 @@ server for AI agents (Claude Code, Cursor, any MCP HTTP client). Pull the
 image, run it, and your agent pairs the phone and controls WhatsApp — all
 through MCP.
 
-Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 24
+Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 25
 MCP tools today (cache-backed chat / message reads, contact and group
-lookup, `send_message`, polls, `download_media`, `ping`, `cache_sync` /
-`cache_sync_status`, plus native `pairing_start` /
+lookup, `send_message`, `send_reaction`, polls, `download_media`, `ping`,
+`cache_sync` / `cache_sync_status`, plus native `pairing_start` /
 `pairing_complete`); coverage and gaps are tracked
 in [SUPPORTED.md](https://github.com/angel-manuel/whatsapp-mcp-docker/blob/master/SUPPORTED.md).
 Source, full docs, and changelog:
@@ -99,14 +99,17 @@ client-certificate auth must front it with a reverse proxy.
 
 ## Tools
 
-24 MCP tools today: cache-backed chat / message reads
+25 MCP tools today: cache-backed chat / message reads
 (`list_chats`, `list_conversations`, `get_chat`, `list_messages`,
 `get_message_context`, `get_last_interaction`, `get_contact_chats`,
 `get_direct_chat_by_contact`, `get_conversation`), contacts (`search_contacts`,
 `list_all_contacts`, `get_contact_details`, `resolve_jid`), `get_group_info`,
-`send_message` (text), polls (`send_poll`, `vote_poll`, `get_poll_results`),
+`send_message` (text), `send_reaction`,
+polls (`send_poll`, `vote_poll`, `get_poll_results`),
 `download_media`, and the native `ping`,
 `cache_sync`, `cache_sync_status`, `pairing_start`, `pairing_complete`.
+Every message-returning read tool also reports the emoji reactions on each
+message.
 Full coverage matrix and
 not-yet-supported list:
 [SUPPORTED.md](https://github.com/angel-manuel/whatsapp-mcp-docker/blob/master/SUPPORTED.md).

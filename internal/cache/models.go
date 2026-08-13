@@ -124,3 +124,23 @@ type Message struct {
 	IsFromMe       bool
 	Media          *Media
 }
+
+// Reaction mirrors the reactions table row. Reactions are not messages:
+// WhatsApp allows exactly one per sender per message, a new emoji replaces the
+// sender's previous one, and an empty emoji removes it. The natural key is
+// therefore (ChatJID, TargetID, SenderJID) — see UpsertReaction/DeleteReaction.
+type Reaction struct {
+	// ChatJID is the chat the reacted-to message lives in.
+	ChatJID string
+	// TargetID is the id of the message being reacted to (messages.id).
+	TargetID string
+	// SenderJID is the reactor. Empty when the source did not name one.
+	SenderJID string
+	// Emoji is the reaction glyph. Never empty in a stored row — a removal
+	// deletes the row instead (see DeleteReaction).
+	Emoji string
+	// Timestamp is the reaction's own time, not the target message's.
+	Timestamp time.Time
+	// IsFromMe reports whether we are the reactor.
+	IsFromMe bool
+}
