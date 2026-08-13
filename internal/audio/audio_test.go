@@ -224,6 +224,30 @@ func TestToOpus_SurfacesFFmpegFailure(t *testing.T) {
 	}
 }
 
+// A stuck ffmpeg must not hold an MCP call open indefinitely.
+func TestToOpus_TimesOut(t *testing.T) {
+	ffmpeg := stubFFmpeg(t, `sleep 30`)
+
+	start := time.Now()
+	_, err := NewTranscoder(ffmpeg, WithTimeout(150*time.Millisecond)).
+		ToOpus(context.Background(), strings.NewReader("audio"))
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want a timeout error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("took %s, want the configured timeout to cut it short", elapsed)
+	}
+}
+
+func TestWithTimeout_NonPositiveKeepsTheDefault(t *testing.T) {
+	if got := NewTranscoder("ffmpeg", WithTimeout(0)).timeout; got != DefaultTimeout {
+		t.Errorf("timeout = %s, want %s", got, DefaultTimeout)
+	}
+	if got := NewTranscoder("ffmpeg").timeout; got != DefaultTimeout {
+		t.Errorf("default timeout = %s, want %s", got, DefaultTimeout)
+	}
+}
+
 func TestToOpus_EmptyOutputIsAnError(t *testing.T) {
 	ffmpeg := stubFFmpeg(t, `exit 0`)
 

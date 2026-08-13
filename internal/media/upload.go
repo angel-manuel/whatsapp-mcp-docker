@@ -2,16 +2,12 @@ package media
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
@@ -33,9 +29,17 @@ const DefaultMaxUploadBytes int64 = 100 << 20
 // usable Content-Type. It matches http.DetectContentType's own window.
 const sniffLen = 512
 
-// ErrTooLarge is returned by PutReader when the payload exceeds the
-// configured cap. The upload route maps it to 413.
-var ErrTooLarge = errors.New("media: upload exceeds the configured size limit")
+// Errors the upload path returns for a caller's mistake rather than a store
+// failure. The route maps them to 4xx; nothing here is logged as an internal
+// error, because none of it is one.
+var (
+	// ErrTooLarge is returned by PutReader when the payload exceeds the
+	// configured cap. The upload route maps it to 413.
+	ErrTooLarge = errors.New("media: upload exceeds the configured size limit")
+	// ErrEmptyUpload is returned by PutReader for a zero-length body. The
+	// upload route maps it to 400.
+	ErrEmptyUpload = errors.New("media: refusing to store an empty upload")
+)
 
 // maxUpload resolves the effective per-upload cap.
 func (s *Store) maxUpload() int64 {
@@ -43,96 +47,6 @@ func (s *Store) maxUpload() int64 {
 		return s.opts.MaxUploadBytes
 	}
 	return DefaultMaxUploadBytes
-}
-
-// PutReader is Put for a stream of unknown length: it spools r to a temp
-// file in the store directory while hashing it, then moves it into place
-// under its own digest. Memory use is bounded regardless of payload size,
-// which is what makes it safe to hang off an HTTP route.
-//
-// Like Put it is idempotent — re-uploading identical bytes is a cache hit
-// that rewrites nothing and counts as a use — and it enforces the store's
-// upload cap, returning ErrTooLarge once the limit is passed.
-func (s *Store) PutReader(r io.Reader, mimeType, filename string) (Descriptor, error) {
-	if mimeType == "" {
-		mimeType = DefaultMime
-	}
-	ext := ExtensionForMime(mimeType)
-
-	tmp, err := os.CreateTemp(s.dir, ".tmp-*")
-	if err != nil {
-		return Descriptor{}, fmt.Errorf("media: create temp in %s: %w", s.dir, err)
-	}
-	tmpName := tmp.Name()
-	keep := false
-	defer func() {
-		_ = tmp.Close()
-		if !keep {
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	// Read one byte past the cap so an exactly-at-limit payload still
-	// succeeds and the first byte over it is detected without buffering the
-	// whole body.
-	limit := s.maxUpload()
-	h := sha256.New()
-	size, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(r, limit+1))
-	if err != nil {
-		return Descriptor{}, fmt.Errorf("media: buffer upload: %w", err)
-	}
-	if size > limit {
-		return Descriptor{}, ErrTooLarge
-	}
-	if size == 0 {
-		return Descriptor{}, errors.New("media: refusing to store an empty upload")
-	}
-	if err := tmp.Close(); err != nil {
-		return Descriptor{}, fmt.Errorf("media: close temp upload: %w", err)
-	}
-
-	digest := hex.EncodeToString(h.Sum(nil))
-	if filename == "" {
-		filename = digest[:12] + ext
-	}
-
-	switch existing, lookupErr := s.readSidecar(digest); {
-	case lookupErr == nil:
-		if _, statErr := os.Stat(s.blobPath(existing)); statErr == nil {
-			s.touch(existing)
-			return existing.descriptor(), nil
-		}
-		// Sidecar without bytes: fall through and rewrite both.
-	case !errors.Is(lookupErr, ErrNotFound):
-		return Descriptor{}, lookupErr
-	}
-
-	meta := sidecar{
-		SHA256:   digest,
-		Mime:     mimeType,
-		Filename: SanitizeFilename(filename),
-		Size:     size,
-		Ext:      ext,
-	}
-	if err := os.Chmod(tmpName, 0o640); err != nil {
-		return Descriptor{}, fmt.Errorf("media: chmod upload %s: %w", digest, err)
-	}
-	if err := os.Rename(tmpName, filepath.Join(s.dir, digest+ext)); err != nil {
-		return Descriptor{}, fmt.Errorf("media: rename upload %s: %w", digest, err)
-	}
-	keep = true
-
-	body, err := json.Marshal(meta)
-	if err != nil {
-		return Descriptor{}, fmt.Errorf("media: marshal sidecar %s: %w", digest, err)
-	}
-	if err := s.writeFile(digest+".json", body); err != nil {
-		// Leave no blob without its sidecar: an orphan would be invisible
-		// to Lookup but still count against the size cap.
-		_ = os.Remove(filepath.Join(s.dir, digest+ext))
-		return Descriptor{}, err
-	}
-	return meta.descriptor(), nil
 }
 
 // UploadHandler accepts POST UploadRoutePattern and stores the request body
@@ -166,14 +80,18 @@ func (s *Store) serveUpload(w http.ResponseWriter, r *http.Request) {
 	desc, err := s.PutReader(body, mimeType, r.URL.Query().Get("filename"))
 	if err != nil {
 		var maxErr *http.MaxBytesError
-		if errors.Is(err, ErrTooLarge) || errors.As(err, &maxErr) {
+		switch {
+		case errors.Is(err, ErrTooLarge), errors.As(err, &maxErr):
 			http.Error(w, fmt.Sprintf("payload exceeds the %d byte limit", limit),
 				http.StatusRequestEntityTooLarge)
-			return
+		case errors.Is(err, ErrEmptyUpload):
+			http.Error(w, "request body is empty; POST the file bytes as the body",
+				http.StatusBadRequest)
+		default:
+			applog.WithEvent(s.log, "media.upload").Error("store upload failed",
+				slog.String("err", err.Error()))
+			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
-		applog.WithEvent(s.log, "media.upload").Error("store upload failed",
-			slog.String("err", err.Error()))
-		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 

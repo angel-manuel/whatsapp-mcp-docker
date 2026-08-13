@@ -119,9 +119,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// Opened before the MCP server so both handlers can be mounted on the
 	// same mux, behind the same bearer auth.
 	mediaStore, err := media.Open(s.cfg.MediaDir(), media.Options{
-		MaxBytes: s.cfg.MediaMaxBytes,
-		TTL:      s.cfg.MediaTTL,
-		Logger:   s.log,
+		MaxBytes:       s.cfg.MediaMaxBytes,
+		TTL:            s.cfg.MediaTTL,
+		MaxUploadBytes: s.cfg.MediaMaxUploadBytes,
+		Logger:         s.log,
 	})
 	if err != nil {
 		return fmt.Errorf("media open: %w", err)

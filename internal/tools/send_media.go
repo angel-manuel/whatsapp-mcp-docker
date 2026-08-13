@@ -24,6 +24,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/audio"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/media"
@@ -44,7 +45,7 @@ const (
 	kindSticker  mediaKind = "sticker"
 )
 
-// mediaTypeFor maps an outbound envelope onto whatsmeow's upload media type.
+// mediaType maps an outbound envelope onto whatsmeow's upload media type.
 // Stickers ride the image type — that is how WhatsApp encrypts them, and it
 // mirrors mediaTypeForKind on the download side.
 func (k mediaKind) mediaType() whatsmeow.MediaType {
@@ -304,4 +305,68 @@ func imageDimensions(f *os.File) (width, height uint32) {
 		return 0, 0
 	}
 	return uint32(cfg.Width), uint32(cfg.Height)
+}
+
+// audioPayload is what an audio send ended up putting on the wire, after the
+// codec rules in prepareAudio had their say. It exists because both audio
+// tools need the same three answers — which bytes, described how, and was a
+// conversion involved — and only differ in what they do with them.
+type audioPayload struct {
+	// opus holds the converted bytes when Transcoded; the stored blob is
+	// streamed straight off disk otherwise.
+	opus []byte
+	// Desc describes the bytes actually sent, which after a transcode is a
+	// different blob than the caller referenced.
+	Desc media.Descriptor
+	// Mime and Seconds go onto the envelope.
+	Mime    string
+	Seconds uint32
+	// Transcoded reports whether ffmpeg ran.
+	Transcoded bool
+}
+
+// prepareAudio resolves which bytes an audio send should upload. The two
+// audio tools differ only in what counts as already-sendable — a voice note
+// demands Opus, an attachment accepts anything WhatsApp plays — so that test
+// is the caller's, passed in as sendable, and everything downstream of it is
+// shared.
+//
+// Bytes that are not sendable as they stand are transcoded when ffmpeg is
+// available and refused when it is not (see transcodeToOpus): the one thing
+// neither tool may do is upload audio the recipient cannot play.
+func prepareAudio(ctx context.Context, deps Deps, f *os.File, desc media.Descriptor,
+	sendable func(audio.Info, media.Descriptor) bool,
+) (audioPayload, *mcpgo.CallToolResult) {
+	// The stored mimetype is a hint from whoever uploaded the bytes; the
+	// magic number is the fact. A probe failure here is a failure to read
+	// the blob at all, which is fatal for both tools — never a silently
+	// duration-less send.
+	info, err := audio.Probe(f)
+	if err != nil {
+		return audioPayload{}, mcp.InternalError(fmt.Sprintf("probe audio %s: %v", desc.SHA256, err))
+	}
+
+	if sendable(info, desc) {
+		return audioPayload{Desc: desc, Mime: desc.Mime, Seconds: info.Seconds()}, nil
+	}
+
+	opus, converted, errRes := transcodeToOpus(ctx, deps, f, desc)
+	if errRes != nil {
+		return audioPayload{}, errRes
+	}
+	out := audioPayload{opus: opus, Desc: converted, Mime: audio.OpusMime, Transcoded: true}
+	if probed, err := audio.ProbeBytes(opus); err == nil {
+		out.Seconds = probed.Seconds()
+	}
+	return out, nil
+}
+
+// uploadAudio pushes the prepared payload to the CDN, picking the entry
+// point that matches where the bytes are: transcoded audio is already in
+// memory, while a stored blob streams off disk.
+func uploadAudio(ctx context.Context, up MediaUploader, f *os.File, p audioPayload) (whatsmeow.UploadResponse, error) {
+	if p.Transcoded {
+		return up.Upload(ctx, p.opus, kindAudio.mediaType())
+	}
+	return up.UploadReader(ctx, f, nil, kindAudio.mediaType())
 }

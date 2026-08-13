@@ -3,10 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
-
-	"go.mau.fi/whatsmeow"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/audio"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
@@ -79,49 +76,30 @@ func sendAudioMessage(deps Deps) mcp.Handler {
 			return mcp.NotPairedError(), nil
 		}
 
-		opts := envelopeOpts{
-			Mime:    audio.OpusMime,
-			PTT:     true,
-			Context: replyContext(in.ReplyToID, deps.WA.OwnJID()),
+		// A voice note is Ogg/Opus or it is nothing: WhatsApp accepts another
+		// codec on the wire and then fails to play it, which the sender sees
+		// as a successful send.
+		payload, errRes := prepareAudio(ctx, deps, f, desc, func(i audio.Info, _ media.Descriptor) bool {
+			return i.IsOggOpus
+		})
+		if errRes != nil {
+			return errRes, nil
 		}
 
-		// The stored mimetype is a hint from whoever uploaded the bytes;
-		// the magic number is the fact. Probe decides, so a mislabelled
-		// upload is transcoded rather than sent as an unplayable note.
-		info, err := audio.Probe(f)
+		resp, err := uploadAudio(ctx, up, f, payload)
 		if err != nil {
-			return mcp.InternalError(fmt.Sprintf("probe audio: %v", err)), nil
+			return uploadFailure(kindAudio, err), nil
 		}
 
-		var (
-			transcoded bool
-			resp       whatsmeow.UploadResponse
-		)
-		if info.IsOggOpus {
-			resp, err = up.UploadReader(ctx, f, nil, kindAudio.mediaType())
-			if err != nil {
-				return uploadFailure(kindAudio, err), nil
-			}
-		} else {
-			opus, newDesc, errRes := transcodeToOpus(ctx, deps, f, desc)
-			if errRes != nil {
-				return errRes, nil
-			}
-			transcoded = true
-			desc = newDesc
-			if probed, err := audio.ProbeBytes(opus); err == nil {
-				info = probed
-			}
-			resp, err = up.Upload(ctx, opus, kindAudio.mediaType())
-			if err != nil {
-				return uploadFailure(kindAudio, err), nil
-			}
+		opts := envelopeOpts{
+			Mime:     audio.OpusMime,
+			PTT:      true,
+			Seconds:  payload.Seconds,
+			Filename: voiceNoteFilename(payload.Desc),
+			Context:  replyContext(in.ReplyToID, deps.WA.OwnJID()),
 		}
 
-		opts.Seconds = info.Seconds()
-		opts.Filename = voiceNoteFilename(desc)
-
-		sent, err := sendUploaded(ctx, deps, to, kindAudio, resp, opts, in.ReplyToID, desc)
+		sent, err := sendUploaded(ctx, deps, to, kindAudio, resp, opts, in.ReplyToID, payload.Desc)
 		if err != nil {
 			return nil, err
 		}
@@ -133,8 +111,8 @@ func sendAudioMessage(deps Deps) mcp.Handler {
 		}
 		return SendAudioResult{
 			SendMediaResult: base,
-			DurationSeconds: opts.Seconds,
-			Transcoded:      transcoded,
+			DurationSeconds: payload.Seconds,
+			Transcoded:      payload.Transcoded,
 			VoiceNote:       true,
 		}, nil
 	}

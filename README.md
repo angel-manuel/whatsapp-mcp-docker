@@ -118,6 +118,7 @@ Most operators only touch these:
 | `MEDIA_MAX_BYTES` | `1073741824` (1 GiB) | Cap on `$DATA_DIR/media`. Over the cap, least-recently-requested blobs are evicted. `0` disables the cap. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Where `send_audio_message` looks for ffmpeg to transcode non-Opus audio. Present in the `-slim` image; absent in the default distroless one, where non-Opus audio is refused instead. |
 | `MEDIA_TTL` | *(unset)* | Go duration (e.g. `168h`). Evicts media older than this. Unset/`0` disables age-based eviction. |
+| `MEDIA_MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Largest single `POST /media` body. Over it the request is refused with `413`; unlike `MEDIA_MAX_BYTES` this is a hard limit, not an eviction trigger. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | How often retention runs. A sweep also runs at startup regardless. |
 
 Full env-var contract: [REQUIREMENTS.md](REQUIREMENTS.md#configuration-environment-variables).
@@ -208,6 +209,11 @@ Sending mirrors it, one step earlier:
    disagrees. Forwarding works with no upload at all: pass a `media_path`
    that `download_media` just returned.
 
+   `caption` belongs to `send_file` only, and only on image, video and
+   document envelopes: audio and sticker messages cannot carry one, so
+   passing it there is rejected rather than silently dropped.
+   `send_audio_message` takes `recipient`, `media_path` and `reply_to_id`.
+
 `send_audio_message` sends a **voice note** (PTT), which WhatsApp only plays
 as Ogg/Opus. Opus goes out as-is on either image variant; anything else
 needs `ffmpeg`. The `-slim` image ships it and transcodes transparently,
@@ -287,10 +293,13 @@ Full pairing contract — events, error codes — is in
 - **Healthcheck is built-in** — `whatsapp-mcp --healthcheck` probes the
   unauthenticated `http://127.0.0.1:$PORT/healthz` liveness endpoint. No shell
   or curl needed in the distroless image.
-- **Media is a bounded cache.** `$DATA_DIR/media` holds attachments fetched
-  by `download_media`, capped by `MEDIA_MAX_BYTES` / `MEDIA_TTL`. Evicted
-  blobs are re-downloaded on the next `download_media` call, so losing them
-  costs a round trip, not data.
+- **Media is a bounded store.** `$DATA_DIR/media` holds both attachments
+  fetched by `download_media` and bytes staged via `POST /media`, capped by
+  `MEDIA_MAX_BYTES` / `MEDIA_TTL` (and per-request by
+  `MEDIA_MAX_UPLOAD_BYTES`). Evicting a *downloaded* blob costs a round trip
+  on the next `download_media` call, not data — but an *uploaded* blob has
+  no origin to re-fetch from, so upload shortly before you send, and treat a
+  `not_found` from `send_file` as "upload it again".
 - **Rootless Podman**: the image runs as UID 1000 (non-root). Named volumes
   are initialised with the correct ownership automatically. If you switch to a
   bind mount instead, add `--userns=keep-id` so the host directory is writable

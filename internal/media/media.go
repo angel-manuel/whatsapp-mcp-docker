@@ -1,11 +1,13 @@
 // Package media owns the on-disk, content-addressed blob store that backs
-// the download_media MCP tool and the GET /media/{sha256} byte route.
+// the media MCP tools and the byte routes they hand out references to:
+// GET /media/{sha256} outbound, POST /media inbound.
 //
-// MCP cannot carry bytes usefully, so the split is deliberate: the tool
-// downloads an attachment and returns a small JSON *descriptor*, and the
-// bytes themselves are fetched out-of-band over plain HTTP from the same
-// authenticated listener that serves /mcp. Nothing in this package ever puts
-// payload bytes into a tool result.
+// MCP cannot carry bytes usefully, so the split is deliberate and runs both
+// ways: download_media fetches an attachment and returns a small JSON
+// *descriptor*, send_file and send_audio_message take one, and the bytes
+// themselves move over plain HTTP on the same authenticated listener that
+// serves /mcp. Nothing in this package ever puts payload bytes into a tool
+// result, or accepts them from one.
 //
 // Layout under the store directory, for a blob whose plaintext SHA-256 is
 // <sha>:
@@ -28,11 +30,13 @@
 package media
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"os"
@@ -76,8 +80,9 @@ type sidecar struct {
 	Ext      string `json:"ext"`
 }
 
-// Options configures retention. Both limits are independent and both are
-// off by default; see Sweep.
+// Options configures retention (MaxBytes, TTL — independent, and both off by
+// default; see Sweep) plus the inbound cap on POST /media, which is a
+// refusal rather than a retention rule and has a non-zero default.
 type Options struct {
 	// MaxBytes caps the total size of stored blobs. Zero means unlimited.
 	MaxBytes int64
@@ -137,38 +142,103 @@ func (s *Store) Dir() string { return s.dir }
 // A cache hit counts as a use (see touch), which is what keeps
 // recently-requested media alive under size-based eviction (see Sweep).
 func (s *Store) Put(data []byte, mimeType, filename string) (Descriptor, error) {
-	sum := sha256.Sum256(data)
-	digest := hex.EncodeToString(sum[:])
+	return s.putStream(bytes.NewReader(data), false, mimeType, filename)
+}
 
+// PutReader is Put for a stream of unknown length, and the entry point the
+// POST /media route uses. Memory use is bounded regardless of payload size,
+// which is what makes it safe to hang off an HTTP handler.
+//
+// Unlike Put, the payload is treated as untrusted: it is capped at the
+// store's upload limit (ErrTooLarge past it) and a zero-length body is
+// refused (ErrEmptyUpload).
+func (s *Store) PutReader(r io.Reader, mimeType, filename string) (Descriptor, error) {
+	return s.putStream(r, true, mimeType, filename)
+}
+
+// putStream is the one implementation behind Put and PutReader. It spools r
+// to a temp file in the store directory while hashing it, then moves it into
+// place under its own digest — so nothing is ever buffered whole in memory
+// and a reader never observes a partially written blob.
+//
+// bounded marks an untrusted inbound payload (an HTTP body rather than bytes
+// this process just downloaded): those are capped at the store's upload limit
+// and may not be empty.
+func (s *Store) putStream(r io.Reader, bounded bool, mimeType, filename string) (Descriptor, error) {
 	if mimeType == "" {
 		mimeType = DefaultMime
 	}
 	ext := ExtensionForMime(mimeType)
+
+	tmp, err := os.CreateTemp(s.dir, ".tmp-*")
+	if err != nil {
+		return Descriptor{}, fmt.Errorf("media: create temp in %s: %w", s.dir, err)
+	}
+	tmpName := tmp.Name()
+	keep := false
+	defer func() {
+		_ = tmp.Close()
+		if !keep {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	src := r
+	limit := s.maxUpload()
+	if bounded {
+		// Read one byte past the cap so a payload exactly at the limit still
+		// succeeds and the first byte over it is detected without buffering
+		// the whole body.
+		src = io.LimitReader(r, limit+1)
+	}
+	h := sha256.New()
+	size, err := io.Copy(io.MultiWriter(tmp, h), src)
+	if err != nil {
+		return Descriptor{}, fmt.Errorf("media: buffer payload: %w", err)
+	}
+	if bounded {
+		if size > limit {
+			return Descriptor{}, ErrTooLarge
+		}
+		if size == 0 {
+			return Descriptor{}, ErrEmptyUpload
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		return Descriptor{}, fmt.Errorf("media: close temp blob: %w", err)
+	}
+
+	digest := hex.EncodeToString(h.Sum(nil))
 	if filename == "" {
 		filename = digest[:12] + ext
 	}
 
-	switch existing, err := s.readSidecar(digest); {
-	case err == nil:
+	switch existing, lookupErr := s.readSidecar(digest); {
+	case lookupErr == nil:
 		if _, statErr := os.Stat(s.blobPath(existing)); statErr == nil {
 			s.touch(existing)
 			return existing.descriptor(), nil
 		}
 		// Sidecar without bytes: fall through and rewrite both.
-	case !errors.Is(err, ErrNotFound):
-		return Descriptor{}, err
+	case !errors.Is(lookupErr, ErrNotFound):
+		return Descriptor{}, lookupErr
 	}
 
 	meta := sidecar{
 		SHA256:   digest,
 		Mime:     mimeType,
 		Filename: SanitizeFilename(filename),
-		Size:     int64(len(data)),
+		Size:     size,
 		Ext:      ext,
 	}
-	if err := s.writeFile(digest+ext, data); err != nil {
-		return Descriptor{}, err
+	if err := os.Chmod(tmpName, 0o640); err != nil {
+		return Descriptor{}, fmt.Errorf("media: chmod blob %s: %w", digest, err)
 	}
+	if err := os.Rename(tmpName, filepath.Join(s.dir, digest+ext)); err != nil {
+		return Descriptor{}, fmt.Errorf("media: rename blob %s: %w", digest, err)
+	}
+	keep = true
+
 	body, err := json.Marshal(meta)
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("media: marshal sidecar %s: %w", digest, err)

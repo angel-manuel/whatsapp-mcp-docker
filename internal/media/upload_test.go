@@ -174,12 +174,21 @@ func TestUpload_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// An empty body is the caller forgetting --data-binary, not a store
+// failure, so it must answer 4xx and leave nothing behind.
 func TestUpload_RejectsEmptyBody(t *testing.T) {
 	s := newTestStore(t, Options{})
 	res := postMedia(t, s, nil, "image/jpeg", "")
 	defer func() { _ = res.Body.Close() }()
-	if res.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500 for an empty upload", res.StatusCode)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an empty upload", res.StatusCode)
+	}
+	entries, err := os.ReadDir(s.Dir())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("store holds %d files after a rejected upload, want none", len(entries))
 	}
 }
 

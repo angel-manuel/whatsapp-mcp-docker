@@ -141,7 +141,7 @@ func sendFile(deps Deps) mcp.Handler {
 		case kindAudio:
 			// The audio path may replace both the bytes and the mimetype,
 			// so it owns the whole upload.
-			return sendAudioAttachment(ctx, deps, sendAudioParams{
+			return sendAudioAttachment(ctx, deps, up, sendAudioParams{
 				to: to, file: f, desc: desc, opts: opts, replyTo: in.ReplyToID,
 			})
 		}
@@ -154,8 +154,33 @@ func sendFile(deps Deps) mcp.Handler {
 	}
 }
 
-// sendAudioParams bundles the arguments shared by the audio branch of
-// send_file. It exists only to keep that call under the argument-count a
+// sendAudioAttachment sends a non-PTT audio message. WhatsApp only plays a
+// known set of codecs (playableAudioMimes); anything else is transcoded to
+// Opus when ffmpeg is available and refused when it is not, so a caller
+// never gets a "sent" result for bytes that will not play.
+func sendAudioAttachment(ctx context.Context, deps Deps, up MediaUploader, p sendAudioParams) (any, error) {
+	payload, errRes := prepareAudio(ctx, deps, p.file, p.desc, func(_ audio.Info, d media.Descriptor) bool {
+		_, ok := playableAudioMimes[baseMime(d.Mime)]
+		return ok
+	})
+	if errRes != nil {
+		return errRes, nil
+	}
+	p.opts.Mime, p.opts.Seconds = payload.Mime, payload.Seconds
+	if payload.Transcoded {
+		// The row should name what was sent, not the .wav that went in.
+		p.opts.Filename = payload.Desc.Filename
+	}
+
+	resp, err := uploadAudio(ctx, up, p.file, payload)
+	if err != nil {
+		return uploadFailure(kindAudio, err), nil
+	}
+	return sendUploaded(ctx, deps, p.to, kindAudio, resp, p.opts, p.replyTo, payload.Desc)
+}
+
+// sendAudioParams bundles what an audio send needs beyond the deps and the
+// uploader. It exists only to keep that call under the argument count a
 // reader can hold.
 type sendAudioParams struct {
 	to      types.JID
@@ -163,43 +188,6 @@ type sendAudioParams struct {
 	desc    media.Descriptor
 	opts    envelopeOpts
 	replyTo string
-}
-
-// sendAudioAttachment sends a non-PTT audio message. WhatsApp only plays a
-// known set of codecs (playableAudioMimes); anything else is transcoded to
-// Opus when ffmpeg is available and refused when it is not, so a caller
-// never gets a "sent" result for bytes that will not play.
-func sendAudioAttachment(ctx context.Context, deps Deps, p sendAudioParams) (any, error) {
-	up := deps.uploader()
-	if up == nil {
-		return mcp.NotPairedError(), nil
-	}
-
-	if _, ok := playableAudioMimes[baseMime(p.desc.Mime)]; ok {
-		if info, err := audio.Probe(p.file); err == nil {
-			p.opts.Seconds = info.Seconds()
-		}
-		resp, err := up.UploadReader(ctx, p.file, nil, kindAudio.mediaType())
-		if err != nil {
-			return uploadFailure(kindAudio, err), nil
-		}
-		return sendUploaded(ctx, deps, p.to, kindAudio, resp, p.opts, p.replyTo, p.desc)
-	}
-
-	opus, desc, errRes := transcodeToOpus(ctx, deps, p.file, p.desc)
-	if errRes != nil {
-		return errRes, nil
-	}
-	p.desc = desc
-	p.opts.Mime = audio.OpusMime
-	if info, err := audio.ProbeBytes(opus); err == nil {
-		p.opts.Seconds = info.Seconds()
-	}
-	resp, err := up.Upload(ctx, opus, kindAudio.mediaType())
-	if err != nil {
-		return uploadFailure(kindAudio, err), nil
-	}
-	return sendUploaded(ctx, deps, p.to, kindAudio, resp, p.opts, p.replyTo, p.desc)
 }
 
 // transcodeToOpus converts the blob behind f to Ogg/Opus and stores the

@@ -41,6 +41,10 @@ const DefaultTimeout = 2 * time.Minute
 // Enough to name the failure, not enough to flood a tool result.
 const stderrTail = 2000
 
+// killGrace is how long a killed ffmpeg has to release its stderr pipe
+// before the pipe is closed out from under it. See ToOpus.
+const killGrace = 2 * time.Second
+
 // ErrUnavailable is returned by Transcoder.ToOpus when no ffmpeg binary is
 // present at the configured path. Callers surface it as "Opus input
 // required" rather than as an internal failure: it is a deployment choice
@@ -52,17 +56,38 @@ var ErrUnavailable = errors.New("audio: ffmpeg is not available")
 type Transcoder struct {
 	// path is the ffmpeg binary (config FFMPEG_PATH).
 	path string
-	// timeout bounds one run. Zero means DefaultTimeout.
+	// timeout bounds one run; see WithTimeout. Zero means DefaultTimeout,
+	// so the zero value cannot produce an unbounded run.
 	timeout time.Duration
 }
 
-// NewTranscoder returns a Transcoder that runs the ffmpeg binary at path.
+// NewTranscoder returns a Transcoder that runs the ffmpeg binary at path,
+// bounded by DefaultTimeout unless WithTimeout says otherwise.
+//
 // An empty path, or a path that does not resolve to an executable, yields a
 // Transcoder whose Available reports false — construction never fails, so
 // wiring code does not have to decide at startup what only matters at call
 // time (an operator may bind-mount ffmpeg into a running container).
-func NewTranscoder(path string) *Transcoder {
-	return &Transcoder{path: path}
+func NewTranscoder(path string, opts ...Option) *Transcoder {
+	t := &Transcoder{path: path, timeout: DefaultTimeout}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
+
+// Option configures a Transcoder at construction.
+type Option func(*Transcoder)
+
+// WithTimeout bounds a single transcode. A non-positive value restores
+// DefaultTimeout.
+func WithTimeout(d time.Duration) Option {
+	return func(t *Transcoder) {
+		if d <= 0 {
+			d = DefaultTimeout
+		}
+		t.timeout = d
+	}
 }
 
 // Path returns the configured ffmpeg path, for error messages that need to
@@ -133,6 +158,12 @@ func (t *Transcoder) ToOpus(ctx context.Context, in io.Reader) ([]byte, error) {
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(runCtx, t.path, ffmpegArgs(inPath, outPath)...) // #nosec G204 -- path is operator config, args are fixed
 	cmd.Stderr = &stderr
+	// Without WaitDelay the timeout above does not actually bound this call:
+	// CommandContext kills ffmpeg itself, but Wait goes on blocking until
+	// every copy of the stderr pipe is closed, and a grandchild that
+	// outlived the kill still holds one. WaitDelay caps that second wait
+	// and closes the pipes itself.
+	cmd.WaitDelay = killGrace
 	if err := cmd.Run(); err != nil {
 		if runCtx.Err() != nil && ctx.Err() == nil {
 			return nil, fmt.Errorf("audio: ffmpeg timed out after %s", timeout)

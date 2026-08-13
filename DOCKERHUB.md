@@ -91,6 +91,7 @@ export the variable in the shell that launches Claude Code.
 | `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`; least-recently-requested evicted first. `0` = unlimited. |
 | `MEDIA_TTL` | *(unset)* | Go duration (e.g. `168h`); evicts older media. Unset = disabled. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period; also runs at startup. |
+| `MEDIA_MAX_UPLOAD_BYTES` | `104857600` | Largest single `POST /media` body; over it the request is refused with `413`. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Where `send_audio_message` looks for ffmpeg to transcode non-Opus audio. Present in `-slim`, absent in the distroless image (where non-Opus audio is refused). |
 
 In production, deliver `AUTH_TOKEN` as a tmpfs-mounted file referenced by
@@ -137,9 +138,11 @@ take that reference.
 - **Non-root** (UID 1000). No `NET_ADMIN` / `SYS_ADMIN` needed.
 - **Read-only root filesystem compatible** — mount `/` as `ro`,
   `/data` (and `/tmp`) as `rw`.
-- **Media is a bounded cache** — `$DATA_DIR/media` holds attachments fetched
-  by `download_media`, capped by `MEDIA_MAX_BYTES` / `MEDIA_TTL`. Evicted
-  blobs are simply re-downloaded on the next call.
+- **Media is a bounded store** — `$DATA_DIR/media` holds attachments fetched
+  by `download_media` *and* bytes staged via `POST /media`, capped by
+  `MEDIA_MAX_BYTES` / `MEDIA_TTL`. An evicted download is re-fetched on the
+  next call; an evicted upload has no origin to re-fetch from, so upload
+  shortly before sending.
 - **One process per `/data`.** Ratchet state rotates on every message;
   startup acquires an exclusive `flock` on `/data/.lock` and exits
   non-zero if another process owns it.

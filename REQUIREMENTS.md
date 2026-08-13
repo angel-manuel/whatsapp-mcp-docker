@@ -118,7 +118,7 @@ MCP has no useful way to carry binary payloads, and putting attachment bytes int
 
 - **`download_media`** (MCP tool) — input `{ chat_jid, message_id }`. Fetches the attachment from WhatsApp's CDN, stores it content-addressed at `$DATA_DIR/media/<sha256>.<ext>`, and returns `{ media_path, mime, size, filename, sha256 }`. The call is idempotent: a digest already stored is a cache hit with no network I/O. Errors: `not_found` (message not cached), `no_media` (message carries no attachment), `media_unavailable` (locator expired or CDN failure), `internal`.
 - **`GET /media/{sha256}`** (HTTP) — mounted on the same listener as `/mcp`, behind the same bearer auth. Sends `Content-Type`, `Content-Length`, `Content-Disposition`, `ETag`, `Last-Modified` and `Cache-Control`; supports `Range` (`206`). `401` without a valid bearer, `404` for an unknown or evicted digest. The path segment MUST be validated as a 64-character hex digest before any filesystem access.
-- **`POST /media`** (HTTP) — the inbound mirror, same listener, same bearer auth. The request body is the raw file; `Content-Type` names the mimetype (sniffed from the leading bytes when absent or `application/octet-stream`) and `?filename=` names the file. Answers `201` with the same `{ media_path, mime, size, filename, sha256 }` descriptor, `413` above 100 MiB, `405` for a non-POST/PUT method. Storage is content-addressed and idempotent, so re-uploading identical bytes is a cache hit. The payload MUST be spooled to disk rather than buffered whole in memory.
+- **`POST /media`** (HTTP) — the inbound mirror, same listener, same bearer auth. The request body is the raw file; `Content-Type` names the mimetype (sniffed from the leading bytes when absent or `application/octet-stream`) and `?filename=` names the file. Answers `201` with the same `{ media_path, mime, size, filename, sha256 }` descriptor, `400` for an empty body, `413` above `MEDIA_MAX_UPLOAD_BYTES` (default 100 MiB), `405` for a non-POST/PUT method. A caller's mistake MUST NOT be reported as `500`. Storage is content-addressed and idempotent, so re-uploading identical bytes is a cache hit. The payload MUST be spooled to disk rather than buffered whole in memory.
 - **`send_file` / `send_audio_message`** (MCP tools) — take `media_path` (a `/media/<sha256>` reference, a bare digest, or a gateway URL ending in one), never bytes, never base64, and never a local filesystem path. A message this server sends is mirrored into the cache with the plaintext digest of what went on the wire, so `download_media` resolves our own sends out of the store.
 
 These are the only non-MCP routes the container serves, and they exist solely because MCP structurally cannot transfer bytes. They do not reopen the `:8082` admin API removed in `99b0ce7`.
@@ -135,7 +135,7 @@ Voice notes (`send_audio_message`, PTT) are Ogg/Opus or they are nothing: WhatsA
 
 `media_direct_path` (migration `004`) is what makes downloads durable: the pre-signed `media_url` expires, the direct path does not. It is only present on the live protobuf at ingest time and CANNOT be backfilled, so messages ingested before that migration may only be downloadable until their URL expires. `download_media` MUST say so explicitly and point at `cache_sync` rather than returning an opaque failure.
 
-Retention: `$DATA_DIR/media` is a cache, not a system of record. It is bounded by `MEDIA_MAX_BYTES` (least-recently-requested evicted first) and optionally `MEDIA_TTL`, swept at startup and every `MEDIA_SWEEP_INTERVAL`. An evicted blob costs a re-download, not data.
+Retention: `$DATA_DIR/media` is a cache, not a system of record. It is bounded by `MEDIA_MAX_BYTES` (least-recently-requested evicted first) and optionally `MEDIA_TTL`, swept at startup and every `MEDIA_SWEEP_INTERVAL`. An evicted *download* costs a re-download, not data. An evicted *upload* has no origin to re-fetch from, so the send tools MUST report a missing digest as `not_found` with instructions to upload again, and callers should upload shortly before sending rather than staging bytes for long periods.
 
 ## Pairing
 
@@ -192,6 +192,7 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 | `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`. Over the cap, least-recently-requested blobs are evicted. `0` = unlimited. |
 | `MEDIA_TTL` | *(unset)* | Go duration; evicts media older than this. Unset/`0` disables age-based eviction. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period. A sweep also runs at startup. |
+| `MEDIA_MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Largest single `POST /media` body. A hard refusal (`413`), not an eviction trigger: it bounds what one request can push onto the volume between sweeps. |
 
 No long-lived secrets in env vars in production: operators should deliver `AUTH_TOKEN` via a secret store mount (tmpfs file + `file://` reference) rather than `-e`.
 

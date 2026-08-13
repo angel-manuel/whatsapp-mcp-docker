@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -39,6 +41,32 @@ func oggOpusFixture(seconds uint64) []byte {
 	b.Write(page(0x00, 0, 1, []byte("OpusTags")))
 	b.Write(page(0x04, preSkip+seconds*48000, 2, []byte("frames")))
 	return b.Bytes()
+}
+
+// removeBlobBytes replaces the stored blob with a directory of the same
+// name. That is the cheapest way to get a file the store can *open* but
+// nothing can *read*: os.Open on a directory succeeds and the first Read
+// fails with EISDIR — which is what a truncated or EIO-ridden blob looks
+// like to the probe, without needing a broken filesystem.
+func removeBlobBytes(t *testing.T, h *mediaHarness) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(h.media.Dir(), h.desc.SHA256+".*"))
+	if err != nil {
+		t.Fatalf("glob blob: %v", err)
+	}
+	for _, m := range matches {
+		if strings.HasSuffix(m, ".json") {
+			continue // keep the sidecar so the descriptor still resolves
+		}
+		if err := os.Remove(m); err != nil {
+			t.Fatalf("remove blob: %v", err)
+		}
+		if err := os.Mkdir(m, 0o750); err != nil {
+			t.Fatalf("replace blob with a directory: %v", err)
+		}
+		return
+	}
+	t.Fatalf("no blob found for %s", h.desc.SHA256)
 }
 
 // errStub is the canned failure the transcoder fakes return.
@@ -203,6 +231,37 @@ func TestSendAudioMessage_TranscodeFailureIsInternal(t *testing.T) {
 	}
 	if h.mock.sendCalls != 0 {
 		t.Error("failed transcode still sent a message")
+	}
+}
+
+// Both audio tools read the stored blob before uploading; a blob that
+// cannot be read is a real failure and must be reported, not turned into a
+// send with no duration. This pins the two tools to the same answer.
+func TestSendAudio_UnreadableBlobIsReportedByBothTools(t *testing.T) {
+	for _, tool := range []string{"send_file", "send_audio_message"} {
+		t.Run(tool, func(t *testing.T) {
+			h := newMediaHarness(t, oggOpusFixture(2), "audio/ogg", "note.ogg",
+				&fakeTranscoder{available: true, out: oggOpusFixture(2)})
+
+			// Delete the bytes out from under the descriptor, leaving the
+			// sidecar: Open succeeds, reading does not.
+			removeBlobBytes(t, h)
+
+			res := callTool(t, h.testHarness, tool, map[string]any{
+				"recipient":  sendChatJID,
+				"media_path": h.desc.MediaPath,
+			})
+			// Same failure, same code from both tools: the probe error is
+			// the diagnosis, not whatever the upload happens to say about
+			// the unreadable bytes afterwards.
+			out := expectError(t, res, mcp.ErrInternal)
+			if msg, _ := out["message"].(string); !strings.Contains(msg, "probe audio") {
+				t.Errorf("message = %q, want it to name the probe failure", msg)
+			}
+			if h.mock.sendCalls != 0 {
+				t.Errorf("%s sent a message despite the unreadable blob", tool)
+			}
+		})
 	}
 }
 

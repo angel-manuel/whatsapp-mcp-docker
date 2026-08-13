@@ -124,15 +124,15 @@ as a contact who is offline.
 ### HTTP routes (not MCP)
 
 Mounted on the same listener and behind the same bearer auth as `/mcp`. This
-is not a general-purpose API: the only non-MCP route is the one thing MCP
-structurally cannot do, which is transfer bytes. The former `internal/admin`
+is not a general-purpose API: the only non-MCP routes are the one thing MCP
+structurally cannot do, which is transfer bytes — out and in. The former `internal/admin`
 package and its `:8082` surface were removed in `99b0ce7`; pairing and health
 are MCP tools (`pairing_start`, `pairing_complete`, `ping`).
 
 | Endpoint               | Backed by                                        |
 | ---------------------- | ------------------------------------------------ |
 | `GET /media/{sha256}`  | `media.Store` — serves blobs stored by `download_media`; `Range`, `ETag`, `Content-Disposition` |
-| `POST /media`          | `media.Store` — stores the request body content-addressed and answers `201` with the same descriptor shape; the `media_path` it returns is what `send_file` / `send_audio_message` take. `Content-Type` sets the mimetype (sniffed when absent), `?filename=` names the file, bodies over 100 MiB are refused with `413` |
+| `POST /media` (also `PUT`) | `media.Store` — stores the request body content-addressed and answers `201` with the same descriptor shape; the `media_path` it returns is what `send_file` / `send_audio_message` take. `Content-Type` sets the mimetype (sniffed from the bytes when absent *or* `application/octet-stream`), `?filename=` names the file. `400` for an empty body, `413` over `MEDIA_MAX_UPLOAD_BYTES` (default 100 MiB) |
 
 ---
 
