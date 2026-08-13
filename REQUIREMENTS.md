@@ -48,7 +48,9 @@ yet implemented: `send_file`, `send_audio_message`, `send_reaction`.
 `get_group_info`, `create_group`, `add_group_members`, `remove_group_members`, `promote_to_admin`, `demote_admin`, `leave_group`, `update_group`
 
 **Polls (1)**
-`create_poll`
+✅ `send_poll` — named `send_poll`, not `create_poll`, to match the
+`send_message` convention every other outbound tool follows. Noted in
+[CHANGES.md](CHANGES.md).
 
 **Presence (2)**
 `set_presence`, `subscribe_presence`
@@ -63,7 +65,9 @@ Each tool's input schema, output shape, and error semantics MUST match the upstr
 
 Beyond the parity surface, the Go build also exposes `get_conversation` — a native, additive read tool with no upstream equivalent. It is the canonical "what's the latest with this person?" front door: it merges every chat for a contact across their phone JID (…@s.whatsapp.net) and privacy LID (…@lid) into one newest-first, de-duplicated timeline of enriched messages. The lower-level per-JID read tools (e.g. `get_direct_chat_by_contact`, `get_contact_chats`) are unchanged and remain available for power use. Like the other cache reads, it is subject to the `not_paired` gate.
 
-In addition to the parity surface, the Go build exposes 2 native tools — `pairing_start`, `pairing_complete` — for agents that drive pairing through the MCP transport. They are the only pairing path (the admin HTTP SSE endpoints were removed in `99b0ce7`); concurrent flows are serialised at the wa layer (`adminMu` + `ErrPairInProgress`). These tools, plus `ping`, are exempt from the `not_paired` gate so that a pre-pair agent can bootstrap itself.
+Polls also gain two native read/write tools with no upstream equivalent — `vote_poll` and `get_poll_results` — because a poll nobody can answer or count is not a feature. Both are documented in `CHANGES.md`; `get_poll_results` reads a tally the ingestor accumulates locally, since neither whatsmeow nor the WhatsApp protocol can be asked for a poll's standings.
+
+In addition to the parity surface, the Go build exposes 2 native pairing tools — `pairing_start`, `pairing_complete` — for agents that drive pairing through the MCP transport. They are the only pairing path (the admin HTTP SSE endpoints were removed in `99b0ce7`); concurrent flows are serialised at the wa layer (`adminMu` + `ErrPairInProgress`). These tools, plus `ping`, are exempt from the `not_paired` gate so that a pre-pair agent can bootstrap itself.
 
 `download_media` diverges from the upstream reference in one deliberate way: it returns a *descriptor*, never the bytes and never base64. See §Media transfer.
 
@@ -85,7 +89,7 @@ In addition to the parity surface, the Go build exposes 2 native tools — `pair
 |                                                                  |
 |   SQLite + blobs:                                                |
 |     /data/session.db  (whatsmeow sqlstore: device, ratchet, ...) |
-|     /data/cache.db    (chats, messages, contacts, nicknames)     |
+|     /data/cache.db  (chats, messages, contacts, nicknames, polls)|
 |     /data/media/      (downloaded attachments, content-addressed)|
 |                                                                  |
 |   ffmpeg  (shelled out, optional, for audio transcode to Opus)  |
@@ -134,7 +138,7 @@ Until pairing succeeds, every MCP tool call MUST return a structured error with 
 
 - `/data` is the only persistent volume; nuke it to fully reset the device identity.
 - `whatsmeow` is configured with its SQLite `sqlstore` pointed at `/data/session.db`. Ratchet state rotates on every message, so only one process may own the volume at a time — the binary acquires an exclusive `flock` on `/data/.lock` at startup and exits non-zero if it is already held.
-- The cache DB at `/data/cache.db` stores the same entities Felix's reference ships: chats, messages, contacts, nicknames, FTS index over message text. Schema documented in `docs/schema.md`.
+- The cache DB at `/data/cache.db` stores the same entities Felix's reference ships: chats, messages, contacts, nicknames, FTS index over message text. It additionally stores poll ballots and votes (`polls`, `poll_options`, `poll_votes`, migration `005`), which have no reference equivalent because poll tallies exist nowhere else — see `get_poll_results` in CHANGES.md. Schema documented in `docs/schema.md`.
 
 ## Session lifecycle events
 

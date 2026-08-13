@@ -130,33 +130,49 @@ func buildOutboundMessage(text, replyTo string, owner types.JID) *waE2E.Message 
 }
 
 func mirrorOutbound(ctx context.Context, store *cache.Store, chatJID string, ownJID, to types.JID, body, msgID, replyTo string, ts time.Time) error {
-	if store == nil {
-		return nil
-	}
-	if err := store.UpsertChat(ctx, cache.Chat{
-		JID:           chatJID,
-		IsGroup:       to.Server == types.GroupServer,
-		LastMessageTS: ts,
-	}); err != nil {
-		return fmt.Errorf("upsert chat: %w", err)
-	}
-	senderJID := ""
-	if !ownJID.IsEmpty() {
-		senderJID = ownJID.ToNonAD().String()
-	}
-	if err := store.InsertMessage(ctx, cache.Message{
+	return mirrorOutboundRow(ctx, store, to, cache.Message{
 		ID:        msgID,
 		ChatJID:   chatJID,
-		SenderJID: senderJID,
+		SenderJID: ownSenderJID(ownJID),
 		Timestamp: ts,
 		Kind:      cache.KindText,
 		Body:      body,
 		ReplyToID: replyTo,
 		IsFromMe:  true,
+	})
+}
+
+// mirrorOutboundRow writes a message this device just sent into the cache:
+// the chat row (so the chat list surfaces it) and the message row itself.
+// Every send tool goes through it so chat-type derivation and the outbound
+// row shape stay defined in exactly one place.
+//
+// `to` is the recipient JID rather than msg.ChatJID because is_group has to
+// come from the parsed JID; the two always describe the same chat.
+func mirrorOutboundRow(ctx context.Context, store *cache.Store, to types.JID, msg cache.Message) error {
+	if store == nil {
+		return nil
+	}
+	if err := store.UpsertChat(ctx, cache.Chat{
+		JID:           msg.ChatJID,
+		IsGroup:       to.Server == types.GroupServer,
+		LastMessageTS: msg.Timestamp,
 	}); err != nil {
+		return fmt.Errorf("upsert chat: %w", err)
+	}
+	if err := store.InsertMessage(ctx, msg); err != nil {
 		return fmt.Errorf("insert message: %w", err)
 	}
 	return nil
+}
+
+// ownSenderJID renders our own JID the way the cache stores senders: non-AD,
+// or empty when the client has not been paired yet.
+func ownSenderJID(ownJID types.JID) string {
+	if ownJID.IsEmpty() {
+		return ""
+	}
+	return ownJID.ToNonAD().String()
 }
 
 // resolveRecipient parses either a full JID or a raw phone number. Raw

@@ -2,6 +2,8 @@ package tools_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
 
 const (
@@ -136,6 +139,68 @@ func TestSendPoll_RejectsBadBallots(t *testing.T) {
 				t.Errorf("sendCalls = %d, want 0: nothing should reach the wire", mock.sendCalls)
 			}
 		})
+	}
+}
+
+// A poll whose secret was not stored is a poll nobody can answer, and the
+// failure is unrecoverable — the secret is generated once, at send time. The
+// tool must surface that rather than reporting a successful send.
+func TestSendPoll_UnstorableSecretIsReportedAsFailure(t *testing.T) {
+	t.Parallel()
+	mock := pollMock("wamid.POLL1")
+	mock.storeSecretErr = errors.New("msg secret store unavailable")
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_poll", map[string]any{
+		"recipient": "1234567890",
+		"question":  "Lunch?",
+		"options":   []any{"Pizza", "Sushi"},
+	})
+	s := expectError(t, res, mcp.ErrInternal)
+	msg, _ := s["message"].(string)
+	// The send already happened, so the error has to name the poll that is now
+	// out there unanswerable rather than read like nothing was sent.
+	if !strings.Contains(msg, "wamid.POLL1") {
+		t.Errorf("message = %q, want the sent poll's id so the caller can find it", msg)
+	}
+	if mock.sendCalls != 1 {
+		t.Errorf("sendCalls = %d, want 1: the poll was sent before the failure", mock.sendCalls)
+	}
+}
+
+func TestSendPoll_BuildFailureWithoutSessionIsNotPaired(t *testing.T) {
+	t.Parallel()
+	mock := pollMock("wamid.POLL1")
+	mock.buildPollErr = wa.ErrNotLoggedIn
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_poll", map[string]any{
+		"recipient": "1234567890",
+		"question":  "Lunch?",
+		"options":   []any{"Pizza", "Sushi"},
+	})
+	// The mcp gate says paired, but the session died underneath it; the tool
+	// has to translate that rather than reporting an opaque internal error.
+	expectError(t, res, mcp.ErrNotPaired)
+	if mock.sendCalls != 0 {
+		t.Errorf("sendCalls = %d, want 0", mock.sendCalls)
+	}
+}
+
+func TestSendPoll_BuildFailureIsInternal(t *testing.T) {
+	t.Parallel()
+	mock := pollMock("wamid.POLL1")
+	mock.buildPollErr = errors.New("proto marshal exploded")
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_poll", map[string]any{
+		"recipient": "1234567890",
+		"question":  "Lunch?",
+		"options":   []any{"Pizza", "Sushi"},
+	})
+	expectError(t, res, mcp.ErrInternal)
+	if mock.sendCalls != 0 {
+		t.Errorf("sendCalls = %d, want 0", mock.sendCalls)
 	}
 }
 

@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -77,10 +78,15 @@ func (s *Server) Run(ctx context.Context) error {
 	// Like cache.Open above, wa session-store bringup runs sqlite migrations
 	// that should not be aborted mid-flight by a fast ctx cancel. Detach
 	// during Open; runtime cancellation is honored via Close/Disconnect.
+	// DeferConnect: the socket must not go live until the ingestor is fully
+	// wired (see SetPollDecrypter below). WhatsApp flushes its offline queue
+	// immediately after login, so an event handler that is still missing a
+	// dependency at that moment misses the burst, not a stray event.
 	waCli, err := wa.Open(context.Background(), wa.Config{
 		DataDir:        s.cfg.DataDir,
 		PairDeviceName: s.cfg.PairDeviceName,
 		EventHook:      ingestor.HandleEvent,
+		DeferConnect:   true,
 	})
 	if err != nil {
 		return fmt.Errorf("wa open: %w", err)
@@ -95,8 +101,17 @@ func (s *Server) Run(ctx context.Context) error {
 	// Poll votes arrive encrypted against the poll creation message, so the
 	// ingestor needs a way back into whatsmeow to read them. It is installed
 	// here rather than passed to NewIngestor because the client above needs
-	// the ingestor's HandleEvent as its own event hook.
+	// the ingestor's HandleEvent as its own event hook — hence DeferConnect,
+	// which keeps this ordering from being a race. A vote that lands before
+	// the decrypter does is lost for good; WhatsApp never resends it.
 	ingestor.SetPollDecrypter(waCli)
+
+	// Now that every event consumer is wired, dial WhatsApp. A failure here is
+	// not fatal: auto-reconnect retries, exactly as the in-Open connect did.
+	if err := waCli.Connect(ctx); err != nil && !errors.Is(err, wa.ErrNotPaired) {
+		log.Warn("initial connect failed; auto-reconnect will retry",
+			slog.String("err", err.Error()))
+	}
 
 	// Media blobs downloaded by download_media and served by the
 	// GET /media/{sha256} byte route. Opened before the MCP server so its

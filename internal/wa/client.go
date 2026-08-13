@@ -59,6 +59,13 @@ type Config struct {
 	// for every raw whatsmeow event after the lifecycle handler runs.
 	// Used to fan events to the cache ingestor without coupling wa to it.
 	EventHook func(evt any)
+	// DeferConnect makes Open return without dialling WhatsApp, leaving the
+	// initial connect to an explicit Connect call. Use it when something has
+	// to be wired between construction and the first inbound event: the
+	// connect that Open would otherwise perform makes the socket live before
+	// Open returns, and events arriving in that window reach EventHook while
+	// the caller is still assembling its dependencies.
+	DeferConnect bool
 }
 
 // Client owns the whatsmeow client, the sqlstore container, and the lifecycle
@@ -101,6 +108,9 @@ type Client struct {
 // present on disk the client attempts an initial connect; when no device
 // exists the client stays disconnected in not_paired state until the caller
 // drives the pairing flow.
+//
+// Set Config.DeferConnect to suppress that initial connect and drive it with
+// Connect once the caller has finished wiring itself up.
 func Open(ctx context.Context, cfg Config) (*Client, error) {
 	if cfg.DataDir == "" {
 		cfg.DataDir = DefaultDataDir
@@ -145,7 +155,7 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 
 	go c.dispatch()
 
-	if c.device.ID != nil {
+	if c.device.ID != nil && !cfg.DeferConnect {
 		c.mu.Lock()
 		c.state = StateConnecting
 		wm := c.wm

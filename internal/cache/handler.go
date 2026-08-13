@@ -82,10 +82,16 @@ func NewIngestor(store *Store, logger *slog.Logger) *Ingestor {
 	return &Ingestor{store: store, logger: logger}
 }
 
-// SetPollDecrypter installs (or, with a nil argument, removes) the surface
-// used to decrypt incoming poll votes. It is safe to call while events are
-// flowing: the wa client is rebuilt on every pair/unpair, and this is how the
-// ingestor picks the new one up.
+// SetPollDecrypter installs the surface used to decrypt incoming poll votes.
+// It must be called before the whatsmeow client connects: a vote that arrives
+// while no decrypter is installed is dropped for good, and the reconnect that
+// flushes WhatsApp's offline queue is exactly when votes arrive in bulk.
+//
+// A nil argument clears the decrypter rather than installing a nil interface
+// that would panic on the next vote. Nothing in production clears it — the wa
+// client survives pair/unpair (only its inner whatsmeow client is swapped, and
+// internal/wa resolves that per call) — but the setter must not turn a
+// caller's nil into a crash.
 func (i *Ingestor) SetPollDecrypter(d PollDecrypter) {
 	if d == nil {
 		i.pollDecrypter.Store(nil)
@@ -148,14 +154,6 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 		ts = time.Now()
 	}
 
-	// A poll update is a vote, not a message: it has no body, never appears in
-	// a chat transcript, and targets the poll creation message by id. It is
-	// handled entirely by the poll tables.
-	if vote := evt.Message.GetPollUpdateMessage(); vote != nil {
-		i.handlePollVote(ctx, evt, vote)
-		return
-	}
-
 	// Protocol-level edits and revokes come in first: they target an
 	// existing message id rather than inserting a new one.
 	if proto := evt.Message.GetProtocolMessage(); proto != nil {
@@ -199,6 +197,18 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 	// is the phone JID, and vice-versa). Record the pairing so the read side
 	// can merge a contact's split phone/LID threads (see get_conversation).
 	i.recordJIDAlias(ctx, evt.Info.Sender, evt.Info.SenderAlt)
+
+	// A poll update is a vote, not a message: it has no body, never appears in
+	// a chat transcript, and targets the poll creation message by id, so it is
+	// recorded in the poll tables instead of the messages table. It is handled
+	// here rather than at the top of the function so a vote still contributes
+	// the chat, contact and lid<->phone alias facts above — a group member who
+	// votes without ever having sent a message is otherwise unnameable, which
+	// is exactly what get_poll_results needs those facts for.
+	if vote := evt.Message.GetPollUpdateMessage(); vote != nil {
+		i.handlePollVote(ctx, evt, vote)
+		return
+	}
 
 	msg := buildMessageRow(chatJID, senderJID, evt.Info.ID, evt.Info.PushName, ts, evt.Info.IsFromMe, evt.Message)
 	if msg == nil {

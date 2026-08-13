@@ -361,6 +361,32 @@ func TestDownloadMedia_MediaKindWithoutKeyIsNoMedia(t *testing.T) {
 	expectError(t, res, mcp.ErrNoMedia)
 }
 
+// A poll has no attachment and never will, so it must not be reported with the
+// "no media key was cached, run cache_sync" message — that advice can only
+// send the caller round a loop that cannot help.
+func TestDownloadMedia_PollHasNoMedia(t *testing.T) {
+	h := newHarnessWithDeps(t, true, func(s *cache.Store) {
+		if err := s.InsertMessage(context.Background(), cache.Message{
+			ID: "wamid.POLL", ChatJID: mediaChatJID, SenderJID: mediaChatJID,
+			Timestamp: time.Unix(1_700_000_000, 0), Kind: cache.KindPoll, Body: "Lunch?",
+		}); err != nil {
+			panic(err)
+		}
+	}, nil, func(d *tools.Deps) { d.Downloader = &fakeDownloader{} })
+
+	res := callTool(t, h, "download_media", map[string]any{
+		"chat_jid": mediaChatJID, "message_id": "wamid.POLL",
+	})
+	out := expectError(t, res, mcp.ErrNoMedia)
+	msg, _ := out["message"].(string)
+	if !strings.Contains(msg, "carries no attachment") {
+		t.Errorf("message = %q, want the 'carries no attachment' wording", msg)
+	}
+	if strings.Contains(msg, "cache_sync") {
+		t.Errorf("message = %q, must not advise cache_sync: re-ingesting cannot give a poll an attachment", msg)
+	}
+}
+
 func TestDownloadMedia_UnknownMessageIsNotFound(t *testing.T) {
 	h := newHarnessWithDeps(t, true, nil, nil,
 		func(d *tools.Deps) { d.Downloader = &fakeDownloader{} })

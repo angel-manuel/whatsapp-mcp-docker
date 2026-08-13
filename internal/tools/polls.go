@@ -24,9 +24,12 @@ const maxPollOptions = 12
 // pollTallyCaveat explains the one thing a caller must understand about poll
 // results before acting on them: they are accumulated from live vote events,
 // because whatsmeow (and the WhatsApp protocol) offers no way to ask the
-// server for a poll's current standings.
+// server for a poll's current standings. It is returned on every successful
+// tally (PollResults.Caveat) and embedded in the not-found error, so a caller
+// that never reads the tool description still gets it.
 //
-// No trailing period: this is appended to tool descriptions and error strings.
+// No trailing period: it is embedded in error strings, and ST1005 wants those
+// to end without punctuation.
 const pollTallyCaveat = "the tally is what this device observed — WhatsApp never replays poll votes, " +
 	"so votes cast before the device was linked, or while the container was down, are not counted"
 
@@ -500,26 +503,17 @@ func pollMessageInfo(poll cache.Poll) (*types.MessageInfo, error) {
 	return info, nil
 }
 
-// mirrorOutboundPoll writes the poll we just sent into the cache: the chat, a
-// messages row (so it shows up in list_messages like any other message, which
-// is where a caller gets the id it needs), and the ballot itself.
+// mirrorOutboundPoll writes the poll we just sent into the cache: the chat and
+// messages row via the shared outbound mirror (so it shows up in list_messages
+// like any other message, which is where a caller gets the id it needs), plus
+// the ballot, which only polls have.
 func mirrorOutboundPoll(ctx context.Context, store *cache.Store, to, ownJID types.JID, msgID, question string, options []string, selectable int, ts time.Time) error {
 	if store == nil {
 		return nil
 	}
 	chatJID := to.String()
-	if err := store.UpsertChat(ctx, cache.Chat{
-		JID:           chatJID,
-		IsGroup:       to.Server == types.GroupServer,
-		LastMessageTS: ts,
-	}); err != nil {
-		return fmt.Errorf("upsert chat: %w", err)
-	}
-	senderJID := ""
-	if !ownJID.IsEmpty() {
-		senderJID = ownJID.ToNonAD().String()
-	}
-	if err := store.InsertMessage(ctx, cache.Message{
+	senderJID := ownSenderJID(ownJID)
+	if err := mirrorOutboundRow(ctx, store, to, cache.Message{
 		ID:        msgID,
 		ChatJID:   chatJID,
 		SenderJID: senderJID,
@@ -528,7 +522,7 @@ func mirrorOutboundPoll(ctx context.Context, store *cache.Store, to, ownJID type
 		Body:      question,
 		IsFromMe:  true,
 	}); err != nil {
-		return fmt.Errorf("insert message: %w", err)
+		return err
 	}
 	poll := cache.Poll{
 		ChatJID:         chatJID,
