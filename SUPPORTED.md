@@ -39,6 +39,9 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Any recipient → readable identity            | `resolve_jid`         | cache only (`GetGroupInfo` only for an unnamed group)         |
 | Authoritative group metadata                 | `get_group_info`      | `GetGroupInfo`                                                |
 | Send text message                            | `send_message`        | `SendMessage` (text only)                                     |
+| Create a poll                                | `send_poll`           | `BuildPollCreation` + `SendMessage` (+ `PutMessageSecret`, so votes on our own poll stay readable) |
+| Vote on / withdraw from a poll               | `vote_poll`           | `BuildPollVote` + `SendMessage`                               |
+| Read a poll's tally                          | `get_poll_results`    | cache only (votes accumulated from `DecryptPollVote`)         |
 | Download a message attachment                | `download_media`      | `DownloadMediaWithPath`, `Download` (URL fallback)            |
 | Start a pair flow                            | `pairing_start`       | `StartPairing`, `PairPhone`                                   |
 | Poll an in-progress pair flow                | `pairing_complete`    | `PairWaitNext` / `PairLatest`                                 |
@@ -64,6 +67,16 @@ events arrive.
 | `*events.Pin`               | pinned flag                                    |
 | `*events.Archive`           | archived flag                                  |
 | `*events.Star`              | chat row only (no `messages.starred` yet)      |
+| `*events.Message` (poll creation) | `poll` message row + `polls` / `poll_options` ballot (migration `005`) |
+| `*events.Message` (poll update)   | decrypted via `DecryptPollVote` into `poll_votes` (migration `005`); no message row |
+
+Poll tallies are accumulated here and nowhere else. Neither whatsmeow nor the
+WhatsApp protocol offers a way to ask the server for a poll's current
+standings: votes exist only as the `PollUpdateMessage` events above, and they
+are never replayed. `get_poll_results` therefore reports what this device
+observed — votes cast before pairing, or while the container was down, are
+gone. A vote whose poll secret whatsmeow never held cannot be decrypted at
+all; it is logged and dropped, since nothing about it is recoverable later.
 
 Media envelopes additionally persist `media_direct_path` (migration `004`),
 which is what `download_media` needs to re-request the CDN object after the
@@ -103,7 +116,6 @@ is genuinely uncalled.
 | ⭐ `BuildReaction` + `SendMessage`                  | react with an emoji.                                               |
 | ⭐ `RevokeMessage` (`BuildRevoke` + send)           | delete-for-everyone.                                               |
 | ⭐ `BuildEdit` + `SendMessage`                      | edit a previously sent message.                                    |
-| `BuildPollCreation` + `BuildPollVote`               | polls.                                                             |
 | `MarkRead`                                          | send read receipts.                                                |
 | `SendChatPresence`                                  | typing / recording / paused indicator.                             |
 | `SendPresence`                                      | global online/offline.                                             |

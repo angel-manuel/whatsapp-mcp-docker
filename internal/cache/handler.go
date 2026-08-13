@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -11,6 +12,18 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
+
+// PollDecrypter unwraps the encrypted vote carried by a poll update event.
+// *whatsmeow.Client satisfies it via DecryptPollVote, and internal/wa forwards
+// to it; the Ingestor keeps it as an interface so poll ingestion can be tested
+// without a live WhatsApp session.
+//
+// Decryption needs the poll creation message's secret, which whatsmeow only
+// holds for polls this device actually saw. A vote on an older poll therefore
+// fails here permanently — there is nothing to retry.
+type PollDecrypter interface {
+	DecryptPollVote(ctx context.Context, vote *events.Message) (*waE2E.PollVoteMessage, error)
+}
 
 // Ingestor subscribes to whatsmeow events (and session lifecycle events
 // re-dispatched by the server) and persists their payloads into the cache
@@ -23,6 +36,12 @@ type Ingestor struct {
 	store       *Store
 	logger      *slog.Logger
 	lastEventTS atomic.Int64 // unix seconds of the most recent recognized event
+
+	// pollDecrypter is installed after construction because the whatsmeow
+	// client that satisfies it is opened *after* the ingestor (the client
+	// needs the ingestor's HandleEvent as its event hook). Nil means poll
+	// votes are counted as unreadable rather than ingested.
+	pollDecrypter atomic.Pointer[PollDecrypter]
 
 	// Per-app-state-event counters used by the cache_sync orchestrator's
 	// app_state stage to estimate items processed per FetchAppState patch.
@@ -61,6 +80,18 @@ func NewIngestor(store *Store, logger *slog.Logger) *Ingestor {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Ingestor{store: store, logger: logger}
+}
+
+// SetPollDecrypter installs (or, with a nil argument, removes) the surface
+// used to decrypt incoming poll votes. It is safe to call while events are
+// flowing: the wa client is rebuilt on every pair/unpair, and this is how the
+// ingestor picks the new one up.
+func (i *Ingestor) SetPollDecrypter(d PollDecrypter) {
+	if d == nil {
+		i.pollDecrypter.Store(nil)
+		return
+	}
+	i.pollDecrypter.Store(&d)
 }
 
 // HandleEvent dispatches on the concrete whatsmeow event type. Unknown events
@@ -117,6 +148,14 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 		ts = time.Now()
 	}
 
+	// A poll update is a vote, not a message: it has no body, never appears in
+	// a chat transcript, and targets the poll creation message by id. It is
+	// handled entirely by the poll tables.
+	if vote := evt.Message.GetPollUpdateMessage(); vote != nil {
+		i.handlePollVote(ctx, evt, vote)
+		return
+	}
+
 	// Protocol-level edits and revokes come in first: they target an
 	// existing message id rather than inserting a new one.
 	if proto := evt.Message.GetProtocolMessage(); proto != nil {
@@ -169,6 +208,8 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 		i.logger.Warn("cache: insert message",
 			slog.String("chat_jid", chatJID), slog.String("message_id", evt.Info.ID), slog.String("err", err.Error()))
 	}
+
+	i.persistPollCreation(ctx, chatJID, senderJID, evt.Info.ID, ts, evt.Info.IsFromMe, evt.Message)
 }
 
 // recordJIDAlias persists the link between a contact's phone-number JID and
@@ -275,6 +316,7 @@ func (i *Ingestor) handleHistorySync(ctx context.Context, evt *events.HistorySyn
 				i.logger.Warn("cache: history insert message",
 					slog.String("chat_jid", chatJIDStr), slog.String("message_id", key.GetID()), slog.String("err", err.Error()))
 			}
+			i.persistPollCreation(ctx, chatJIDStr, senderJID, key.GetID(), rowTS, key.GetFromMe(), web.GetMessage())
 		}
 
 		chat := Chat{JID: chatJIDStr, IsGroup: chatJID.Server == types.GroupServer, LastMessageTS: latestTS}
@@ -458,6 +500,120 @@ func (i *Ingestor) handleStar(ctx context.Context, evt *events.Star) {
 	}
 }
 
+// persistPollCreation mirrors the ballot of a poll creation message into the
+// poll tables. It is a no-op for every other envelope, so both the live and
+// the history-sync ingest paths can call it unconditionally.
+func (i *Ingestor) persistPollCreation(ctx context.Context, chatJID, senderJID, msgID string, ts time.Time, isFromMe bool, msg *waE2E.Message) {
+	poll := extractPollCreation(msg)
+	if poll == nil {
+		return
+	}
+	row := Poll{
+		ChatJID:         chatJID,
+		MessageID:       msgID,
+		Question:        poll.GetName(),
+		SelectableCount: int(poll.GetSelectableOptionsCount()),
+		SenderJID:       senderJID,
+		IsFromMe:        isFromMe,
+		Timestamp:       ts,
+	}
+	for _, opt := range poll.GetOptions() {
+		row.Options = append(row.Options, PollOption{Name: opt.GetOptionName()})
+	}
+	if err := i.store.UpsertPoll(ctx, row); err != nil {
+		i.logger.Warn("cache: upsert poll",
+			slog.String("chat_jid", chatJID), slog.String("message_id", msgID), slog.String("err", err.Error()))
+	}
+}
+
+// handlePollVote decrypts an incoming poll update and records the voter's
+// selection. The vote is stored against the chat the *event* arrived in, not
+// the one named by the poll key: in a direct chat each side's key points at
+// the other party, so only the event's own chat matches the poll row.
+//
+// A vote we cannot decrypt is dropped with a warning. That is terminal, not
+// transient — the poll's secret is either in whatsmeow's store or it never
+// will be — so retrying or persisting the ciphertext would buy nothing.
+func (i *Ingestor) handlePollVote(ctx context.Context, evt *events.Message, vote *waE2E.PollUpdateMessage) {
+	pollID := vote.GetPollCreationMessageKey().GetID()
+	if pollID == "" {
+		return
+	}
+	chatJID := evt.Info.Chat.String()
+
+	dec := i.pollDecrypter.Load()
+	if dec == nil {
+		i.logger.Warn("cache: poll vote dropped; no decrypter installed",
+			slog.String("chat_jid", chatJID), slog.String("poll_message_id", pollID))
+		return
+	}
+	decrypted, err := (*dec).DecryptPollVote(ctx, evt)
+	if err != nil {
+		i.logger.Warn("cache: decrypt poll vote",
+			slog.String("chat_jid", chatJID), slog.String("poll_message_id", pollID),
+			slog.String("err", err.Error()))
+		return
+	}
+
+	// An empty selection is a voter clearing their vote, which is exactly why
+	// the slice is built even when there is nothing to append: a nil would be
+	// indistinguishable from "never voted" downstream.
+	selected := make([]string, 0, len(decrypted.GetSelectedOptions()))
+	for _, hash := range decrypted.GetSelectedOptions() {
+		selected = append(selected, hex.EncodeToString(hash))
+	}
+
+	ts := evt.Info.Timestamp
+	if ms := vote.GetSenderTimestampMS(); ms > 0 {
+		ts = time.UnixMilli(ms)
+	}
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+
+	if err := i.store.UpsertPollVote(ctx, PollVote{
+		ChatJID:        chatJID,
+		PollMessageID:  pollID,
+		VoterJID:       evt.Info.Sender.ToNonAD().String(),
+		SelectedHashes: selected,
+		Timestamp:      ts,
+	}); err != nil {
+		i.logger.Warn("cache: upsert poll vote",
+			slog.String("chat_jid", chatJID), slog.String("poll_message_id", pollID),
+			slog.String("err", err.Error()))
+	}
+}
+
+// extractPollCreation returns the poll carried by a message, whichever of the
+// numbered PollCreationMessage fields it arrived in. WhatsApp has revised the
+// envelope repeatedly (V2, V3, V5, V6 are the same message type; V4 wraps it
+// in a FutureProofMessage) while keeping the payload identical, so all of them
+// are worth reading.
+func extractPollCreation(msg *waE2E.Message) *waE2E.PollCreationMessage {
+	if p := directPollCreation(msg); p != nil {
+		return p
+	}
+	return directPollCreation(msg.GetPollCreationMessageV4().GetMessage())
+}
+
+func directPollCreation(msg *waE2E.Message) *waE2E.PollCreationMessage {
+	if msg == nil {
+		return nil
+	}
+	for _, p := range []*waE2E.PollCreationMessage{
+		msg.GetPollCreationMessage(),
+		msg.GetPollCreationMessageV2(),
+		msg.GetPollCreationMessageV3(),
+		msg.GetPollCreationMessageV5(),
+		msg.GetPollCreationMessageV6(),
+	} {
+		if p != nil {
+			return p
+		}
+	}
+	return nil
+}
+
 // buildMessageRow pulls the shape of a Message row out of a waE2E.Message.
 // Returns nil when the envelope carries nothing worth persisting.
 func buildMessageRow(chatJID, senderJID, id, pushName string, ts time.Time, isFromMe bool, msg *waE2E.Message) *Message {
@@ -503,8 +659,9 @@ func extractTextBody(msg *waE2E.Message) string {
 	return ""
 }
 
-// extractEnvelope reports the message kind, media metadata, and any media
-// caption we should promote into the searchable body column.
+// extractEnvelope reports the message kind, media metadata, and any secondary
+// text (a media caption, a poll question) that should be promoted into the
+// searchable body column when the envelope carries no body of its own.
 func extractEnvelope(msg *waE2E.Message) (MessageKind, *Media, string) {
 	if msg == nil {
 		return KindOther, nil, ""
@@ -556,6 +713,12 @@ func extractEnvelope(msg *waE2E.Message) (MessageKind, *Media, string) {
 			EncSHA256:  doc.GetFileEncSHA256(),
 			Length:     doc.GetFileLength(),
 		}, doc.GetCaption()
+	}
+	if poll := extractPollCreation(msg); poll != nil {
+		// The poll question is promoted into the body so a poll is legible in
+		// list_messages and reachable by full-text search; the ballot and the
+		// tally live in the poll tables.
+		return KindPoll, nil, poll.GetName()
 	}
 	if st := msg.GetStickerMessage(); st != nil {
 		return KindSticker, &Media{

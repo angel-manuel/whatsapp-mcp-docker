@@ -62,6 +62,24 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			Handler:     sendMessage(deps),
 		},
 		{
+			Name:        "send_poll",
+			Description: "Create a WhatsApp poll in a user or group chat. Returns the poll's message_id, which is the handle vote_poll and get_poll_results take.",
+			InputSchema: sendPollSchema,
+			Handler:     sendPoll(deps),
+		},
+		{
+			Name:        "vote_poll",
+			Description: "Cast (or withdraw) this device's vote on a poll. Option texts must match the ballot exactly; pass an empty options array to withdraw. Only polls this device received can be voted on.",
+			InputSchema: votePollSchema,
+			Handler:     votePoll(deps),
+		},
+		{
+			Name:        "get_poll_results",
+			Description: "Read the tally of a poll: per-option vote counts and voters. Answered from the local cache, which accumulates vote events as they arrive — WhatsApp offers no way to query a poll's standings, so votes cast before this device was linked (or while it was down) are not counted.",
+			InputSchema: getPollResultsSchema,
+			Handler:     getPollResults(deps),
+		},
+		{
 			Name:        "pairing_start",
 			Description: "Start a WhatsApp pair flow and return the first rotating QR payload. Pass `phone` to also obtain a phone-number linking code. Exempt from the not_paired gate.",
 			InputSchema: pairingStartSchema,

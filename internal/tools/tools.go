@@ -33,6 +33,14 @@ type WAClient interface {
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error)
 	OwnJID() types.JID
 
+	// Poll surface — used by send_poll and vote_poll. StoreMessageSecret is
+	// part of it because whatsmeow only records a message secret for messages
+	// it *receives*; a poll we send has to have its secret persisted by hand
+	// or the votes on it can never be decrypted.
+	BuildPollCreation(name string, options []string, selectableCount int) (*waE2E.Message, error)
+	BuildPollVote(ctx context.Context, pollInfo *types.MessageInfo, optionNames []string) (*waE2E.Message, error)
+	StoreMessageSecret(ctx context.Context, chat, sender types.JID, id types.MessageID, secret []byte) error
+
 	// Whatsmeow exposes the raw client for surfaces this interface does
 	// not wrap — today only media downloads, which need whatsmeow's
 	// media-conn refresh and CDN retry logic verbatim. May return nil

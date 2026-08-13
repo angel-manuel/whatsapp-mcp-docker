@@ -92,6 +92,12 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Poll votes arrive encrypted against the poll creation message, so the
+	// ingestor needs a way back into whatsmeow to read them. It is installed
+	// here rather than passed to NewIngestor because the client above needs
+	// the ingestor's HandleEvent as its own event hook.
+	ingestor.SetPollDecrypter(waCli)
+
 	// Media blobs downloaded by download_media and served by the
 	// GET /media/{sha256} byte route. Opened before the MCP server so its
 	// handler can be mounted on the same mux, behind the same bearer auth.
