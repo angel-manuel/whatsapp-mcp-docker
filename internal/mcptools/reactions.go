@@ -40,12 +40,13 @@ func attachReactions(ctx context.Context, store *cache.Store, msgs []MessageDTO)
 		placeholders = append(placeholders, "(?,?)")
 	}
 
-	// Reaction sender names resolve exactly like message sender names — same
-	// contacts/nicknames join, same ""→null rule via resolveSenderName.
+	// Reaction sender names resolve exactly like message sender names: the same
+	// ct./nk. column list, and the same ""→null rule via resolveSenderName. The
+	// join itself is spelled out here rather than reusing messageContactJoins,
+	// which hardcodes m.sender_jid.
 	query := fmt.Sprintf(`
 SELECT r.chat_jid, r.target_id, r.sender_jid, r.emoji, r.is_from_me,
-       COALESCE(ct.push_name,''), COALESCE(ct.business_name,''),
-       COALESCE(ct.first_name,''), COALESCE(ct.full_name,''), COALESCE(nk.nickname,'')
+       `+messageSenderNameColumns+`
   FROM reactions r
   LEFT JOIN contacts  ct ON ct.jid = r.sender_jid
   LEFT JOIN nicknames nk ON nk.jid = r.sender_jid

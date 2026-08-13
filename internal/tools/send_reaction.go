@@ -103,9 +103,12 @@ func sendReaction(deps Deps) mcp.Handler {
 				"reacting to newsletter/channel messages is not supported yet (needs NewsletterSendReaction)"), nil
 		}
 
-		targetSender, err := resolveReactionTarget(ctx, deps.Cache, chat.String(), targetID, in.SenderJID)
-		if err != nil {
-			return mcp.NotFoundError(err.Error()), nil
+		targetSender, resolveErr := resolveReactionTarget(ctx, deps.Cache, chat.String(), targetID, in.SenderJID)
+		if resolveErr != nil {
+			// Each failure mode gets its own code: a caller retrying after
+			// cache_sync only helps for the uncached case, and a DB failure
+			// must not read as "the message doesn't exist".
+			return mcp.ErrorResult(resolveErr.code, resolveErr.Error()), nil
 		}
 
 		msg := deps.WA.BuildReaction(chat, targetSender, types.MessageID(targetID), in.Emoji)
@@ -146,6 +149,19 @@ func sendReaction(deps Deps) mcp.Handler {
 	}
 }
 
+// codedError carries the structured error code a resolution failure should be
+// reported under, so the caller does not have to re-classify a bare error.
+type codedError struct {
+	code mcp.ErrorCode
+	msg  string
+}
+
+func (e *codedError) Error() string { return e.msg }
+
+func codedErrorf(code mcp.ErrorCode, format string, args ...any) *codedError {
+	return &codedError{code: code, msg: fmt.Sprintf(format, args...)}
+}
+
 // resolveReactionTarget determines the author of the message being reacted to.
 // whatsmeow's BuildReaction uses it to set MessageKey.FromMe and, in groups,
 // MessageKey.Participant — passing our own JID for someone else's message
@@ -154,24 +170,36 @@ func sendReaction(deps Deps) mcp.Handler {
 // An explicit sender_jid wins; otherwise the cache is consulted, and a message
 // we sent resolves to the empty JID (whatsmeow's "this is mine" signal). A
 // message that is neither supplied nor cached is an error rather than a guess.
-func resolveReactionTarget(ctx context.Context, store *cache.Store, chatJID, targetID, explicit string) (types.JID, error) {
+//
+// The returned error is always a *codedError: only a genuinely un-cached
+// message is not_found (the one case where cache_sync is the fix); a bad JID is
+// the caller's mistake, and a failed lookup is ours.
+func resolveReactionTarget(ctx context.Context, store *cache.Store, chatJID, targetID, explicit string) (types.JID, *codedError) {
 	if explicit = strings.TrimSpace(explicit); explicit != "" {
 		jid, err := types.ParseJID(explicit)
 		if err != nil {
-			return types.JID{}, fmt.Errorf("sender_jid %q is not a valid JID: %v", explicit, err)
+			return types.JID{}, codedErrorf(mcp.ErrInvalidArgument, "sender_jid %q is not a valid JID: %v", explicit, err)
+		}
+		// ParseJID is permissive: it turns a bare string into
+		// "<string>@s.whatsapp.net" and accepts an empty user or server. Any of
+		// those would silently key the reaction off a nonexistent identity
+		// rather than reporting the typo, so require both halves explicitly.
+		if !strings.Contains(explicit, "@") || jid.User == "" || jid.Server == "" {
+			return types.JID{}, codedErrorf(mcp.ErrInvalidArgument,
+				"sender_jid %q must be a full JID (e.g. '15551234567@s.whatsapp.net')", explicit)
 		}
 		return jid, nil
 	}
 	if store == nil {
-		return types.JID{}, fmt.Errorf("message %q is not cached; pass sender_jid explicitly", targetID)
+		return types.JID{}, codedErrorf(mcp.ErrNotFound, "message %q is not cached; pass sender_jid explicitly", targetID)
 	}
 	sender, isFromMe, err := store.GetMessageSender(ctx, chatJID, targetID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return types.JID{}, fmt.Errorf(
+			return types.JID{}, codedErrorf(mcp.ErrNotFound,
 				"message %q not found in chat %q; run cache_sync first or pass sender_jid explicitly", targetID, chatJID)
 		}
-		return types.JID{}, fmt.Errorf("look up message %q: %v", targetID, err)
+		return types.JID{}, codedErrorf(mcp.ErrInternal, "look up message %q: %v", targetID, err)
 	}
 	if isFromMe || sender == "" {
 		// An empty JID is how whatsmeow is told the target is our own message.
@@ -179,7 +207,9 @@ func resolveReactionTarget(ctx context.Context, store *cache.Store, chatJID, tar
 	}
 	jid, err := types.ParseJID(sender)
 	if err != nil {
-		return types.JID{}, fmt.Errorf("cached sender %q for message %q is not a valid JID: %v", sender, targetID, err)
+		// The cache holds something that is not a JID — our bug, not theirs.
+		return types.JID{}, codedErrorf(mcp.ErrInternal,
+			"cached sender %q for message %q is not a valid JID: %v", sender, targetID, err)
 	}
 	return jid, nil
 }

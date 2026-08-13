@@ -1250,6 +1250,34 @@ func TestSendReaction_ExplicitSenderJIDOverridesCache(t *testing.T) {
 	}
 }
 
+func TestSendReaction_MalformedSenderJIDIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{ownJID: types.NewJID("15551234567", types.DefaultUserServer)}
+	h := newReactionHarness(t, mock)
+
+	// A typo'd sender_jid is the caller's mistake, not a missing message —
+	// reporting not_found would send them off to run cache_sync for nothing.
+	// types.ParseJID accepts all of these — it turns a bare string into
+	// "<string>@s.whatsapp.net" and tolerates an empty half — so the tool has
+	// to reject them itself.
+	for name, sender := range map[string]string{
+		"no server":    "not-a-jid",
+		"empty user":   "@s.whatsapp.net",
+		"empty server": "111@",
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := callTool(t, h, "send_reaction", map[string]any{
+				"chat_jid": "777@g.us", "message_id": "m-theirs", "emoji": "👍",
+				"sender_jid": sender,
+			})
+			expectError(t, res, mcp.ErrInvalidArgument)
+		})
+	}
+	if mock.sendCalls != 0 {
+		t.Errorf("SendMessage called %d times, want 0", mock.sendCalls)
+	}
+}
+
 func TestSendReaction_RejectsNewsletterChat(t *testing.T) {
 	t.Parallel()
 	mock := &mockWA{ownJID: types.NewJID("15551234567", types.DefaultUserServer)}
