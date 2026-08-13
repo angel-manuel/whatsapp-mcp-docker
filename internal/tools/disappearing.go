@@ -9,25 +9,51 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/types"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
 )
 
-// disappearingDurations is the complete set of timers WhatsApp accepts.
+// disappearingTimers is the complete, ordered set of timers WhatsApp accepts
+// and the single source of truth for the two tools below: the schema enums,
+// the rejection message and the parser are all derived from it, so adding or
+// removing a timer is a one-line change that cannot leave the surfaces
+// disagreeing.
+//
 // whatsmeow's ParseDisappearingTimerString takes a much wider vocabulary of
 // synonyms, and its SetDisappearingTimer will happily forward an arbitrary
 // duration that official clients then ignore (and that the server rejects in
 // groups). Exposing exactly the four real values keeps callers from
 // "succeeding" at setting a timer nobody honours.
-var disappearingDurations = map[string]time.Duration{
-	"off": whatsmeow.DisappearingTimerOff,
-	"24h": whatsmeow.DisappearingTimer24Hours,
-	"7d":  whatsmeow.DisappearingTimer7Days,
-	"90d": whatsmeow.DisappearingTimer90Days,
+var disappearingTimers = []struct {
+	name  string
+	value time.Duration
+}{
+	{"off", whatsmeow.DisappearingTimerOff},
+	{"24h", whatsmeow.DisappearingTimer24Hours},
+	{"7d", whatsmeow.DisappearingTimer7Days},
+	{"90d", whatsmeow.DisappearingTimer90Days},
 }
 
-const disappearingDurationDesc = "Timer to apply: 'off', '24h', '7d' or '90d'. These are the only values WhatsApp honours."
+// Derived from disappearingTimers at init. Package-level var initialisation
+// is dependency-ordered, so the schemas below see the finished strings.
+var (
+	// disappearingEnumJSON is the JSONSchema array body, e.g. `"off", "24h"`.
+	disappearingEnumJSON = disappearingNames(`"%s"`, ", ")
+	// disappearingNameList is the human-readable list used in error text.
+	disappearingNameList = disappearingNames("%s", ", ")
+
+	disappearingDurationDesc = "Timer to apply: one of " + disappearingNameList +
+		". These are the only values WhatsApp honours."
+)
+
+// disappearingNames renders every timer name through format, joined by sep.
+func disappearingNames(format, sep string) string {
+	parts := make([]string, 0, len(disappearingTimers))
+	for _, t := range disappearingTimers {
+		parts = append(parts, fmt.Sprintf(format, t.name))
+	}
+	return strings.Join(parts, sep)
+}
 
 var setDisappearingTimerSchema = json.RawMessage(`{
   "type": "object",
@@ -35,11 +61,11 @@ var setDisappearingTimerSchema = json.RawMessage(`{
     "chat_jid": {
       "type": "string",
       "minLength": 1,
-      "description": "Chat to change: a user JID ('…@s.whatsapp.net' or '…@lid'), a group JID ('…@g.us'), or a raw phone number with country code."
+      "description": "Chat to change: ` + chatJIDForms + `."
     },
     "duration": {
       "type": "string",
-      "enum": ["off", "24h", "7d", "90d"],
+      "enum": [` + disappearingEnumJSON + `],
       "description": "` + disappearingDurationDesc + `"
     }
   },
@@ -52,7 +78,7 @@ var setDefaultDisappearingTimerSchema = json.RawMessage(`{
   "properties": {
     "duration": {
       "type": "string",
-      "enum": ["off", "24h", "7d", "90d"],
+      "enum": [` + disappearingEnumJSON + `],
       "description": "` + disappearingDurationDesc + `"
     }
   },
@@ -89,13 +115,11 @@ func setDisappearingTimer(deps Deps) mcp.Handler {
 		if strings.TrimSpace(in.ChatJID) == "" {
 			return mcp.InvalidArgumentError("chat_jid must not be empty"), nil
 		}
-		chat, err := resolveRecipient(strings.TrimSpace(in.ChatJID))
+		chat, kind, err := chatTarget(in.ChatJID)
 		if err != nil {
 			return mcp.InvalidArgumentError(err.Error()), nil
 		}
-		switch chat.Server {
-		case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
-		default:
+		if kind != jidKindUser && kind != jidKindGroup {
 			return mcp.InvalidArgumentError(
 				fmt.Sprintf("chat_jid %q is a @%s chat, which has no disappearing-message timer", in.ChatJID, chat.Server)), nil
 		}
@@ -146,18 +170,21 @@ func setDefaultDisappearingTimer(deps Deps) mcp.Handler {
 }
 
 func parseDisappearingDuration(in string) (time.Duration, error) {
-	if d, ok := disappearingDurations[strings.ToLower(strings.TrimSpace(in))]; ok {
-		return d, nil
+	want := strings.ToLower(strings.TrimSpace(in))
+	for _, t := range disappearingTimers {
+		if t.name == want {
+			return t.value, nil
+		}
 	}
-	return 0, fmt.Errorf("duration %q is not one of: off, 24h, 7d, 90d", in)
+	return 0, fmt.Errorf("duration %q is not one of: %s", in, disappearingNameList)
 }
 
 // canonicalDisappearingName is the inverse lookup used in result payloads so
 // callers see the canonical spelling regardless of how they cased the input.
 func canonicalDisappearingName(d time.Duration) string {
-	for name, candidate := range disappearingDurations {
-		if candidate == d {
-			return name
+	for _, t := range disappearingTimers {
+		if t.value == d {
+			return t.name
 		}
 	}
 	return d.String()

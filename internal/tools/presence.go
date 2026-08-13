@@ -14,6 +14,10 @@ import (
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
 
+// chatJIDForms is the recipient grammar these tools share with
+// send_message, spelled out once so the schemas cannot drift apart.
+const chatJIDForms = "a user JID ('…@s.whatsapp.net' or '…@lid'), a group JID ('…@g.us'), or a raw phone number with country code"
+
 // statusMessageMaxRunes bounds the "About" text. WhatsApp's own clients cap
 // the field at 139 characters; the server silently truncates beyond that, so
 // we reject rather than let the caller believe it set something it did not.
@@ -51,7 +55,7 @@ var sendChatPresenceSchema = json.RawMessage(`{
     "chat_jid": {
       "type": "string",
       "minLength": 1,
-      "description": "Chat to publish the indicator in: a user JID ('…@s.whatsapp.net' or '…@lid'), a group JID ('…@g.us'), or a raw phone number with country code."
+      "description": "Chat to publish the indicator in: ` + chatJIDForms + `."
     },
     "state": {
       "type": "string",
@@ -168,13 +172,11 @@ func sendChatPresence(deps Deps) mcp.Handler {
 		if strings.TrimSpace(in.ChatJID) == "" {
 			return mcp.InvalidArgumentError("chat_jid must not be empty"), nil
 		}
-		chat, err := resolveRecipient(strings.TrimSpace(in.ChatJID))
+		chat, kind, err := chatTarget(in.ChatJID)
 		if err != nil {
 			return mcp.InvalidArgumentError(err.Error()), nil
 		}
-		switch chat.Server {
-		case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
-		default:
+		if kind != jidKindUser && kind != jidKindGroup {
 			return mcp.InvalidArgumentError(
 				fmt.Sprintf("chat_jid %q is a @%s chat, which has no typing indicator", in.ChatJID, chat.Server)), nil
 		}
@@ -219,13 +221,11 @@ func subscribePresence(deps Deps) mcp.Handler {
 		if strings.TrimSpace(in.JID) == "" {
 			return mcp.InvalidArgumentError("jid must not be empty"), nil
 		}
-		target, err := resolveRecipient(strings.TrimSpace(in.JID))
+		target, kind, err := chatTarget(in.JID)
 		if err != nil {
 			return mcp.InvalidArgumentError(err.Error()), nil
 		}
-		switch target.Server {
-		case types.DefaultUserServer, types.HiddenUserServer:
-		default:
+		if kind != jidKindUser {
 			return mcp.InvalidArgumentError(
 				fmt.Sprintf("jid %q is not a user JID; only individual users publish presence", in.JID)), nil
 		}
@@ -290,6 +290,28 @@ func presenceMediaName(m types.ChatPresenceMedia) string {
 		return "text"
 	}
 	return string(m)
+}
+
+// chatTarget parses a recipient with the same grammar send_message accepts
+// and classifies it through the shared jidKind cascade, so the account-
+// mutating tools agree with resolve_jid and get_contact_details on what
+// counts as a person.
+//
+// Legacy '…@c.us' addresses are rewritten to their modern
+// '…@s.whatsapp.net' spelling. jidKind and phoneJIDFor both already treat
+// the legacy form as a user JID, but whatsmeow's presence, timer and
+// receipt calls only recognise the modern one — rewriting here keeps the
+// recipient grammar uniform across the whole tool surface instead of
+// letting c.us succeed in some tools and fail in others.
+func chatTarget(in string) (types.JID, string, error) {
+	jid, err := resolveRecipient(strings.TrimSpace(in))
+	if err != nil {
+		return types.JID{}, "", err
+	}
+	if jid.Server == types.LegacyUserServer {
+		jid.Server = types.DefaultUserServer
+	}
+	return jid, jidKind(jid), nil
 }
 
 // accountOpError maps a failure from one of the account-mutating whatsmeow

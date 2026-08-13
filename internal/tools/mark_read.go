@@ -23,7 +23,7 @@ var markReadSchema = json.RawMessage(`{
     "chat_jid": {
       "type": "string",
       "minLength": 1,
-      "description": "Chat the messages live in: a user JID ('…@s.whatsapp.net' or '…@lid'), a group JID ('…@g.us'), a newsletter JID, or a raw phone number with country code."
+      "description": "Chat the messages live in: ` + chatJIDForms + `. A newsletter JID is also accepted."
     },
     "message_ids": {
       "type": "array",
@@ -48,6 +48,13 @@ type MarkReadResult struct {
 	MessageIDs []string `json:"message_ids"`
 	Count      int      `json:"count"`
 	ReadTS     int64    `json:"read_ts"`
+	// CacheWarning is set when the receipt went out but the local unread
+	// flag could not be cleared. The result is still a success: the
+	// account-visible half is done and cannot be undone, and the flag is
+	// derived state that cache_sync's app_state stage re-reads from the
+	// server. Reporting an error here would throw away ReadTS and
+	// MessageIDs, leaving the caller unable to tell what it acknowledged.
+	CacheWarning string `json:"cache_warning,omitempty"`
 }
 
 // markRead is the handler for mark_read. It sends the receipt and then
@@ -67,13 +74,11 @@ func markRead(deps Deps) mcp.Handler {
 		if strings.TrimSpace(in.ChatJID) == "" {
 			return mcp.InvalidArgumentError("chat_jid must not be empty"), nil
 		}
-		chat, err := resolveRecipient(strings.TrimSpace(in.ChatJID))
+		chat, kind, err := chatTarget(in.ChatJID)
 		if err != nil {
 			return mcp.InvalidArgumentError(err.Error()), nil
 		}
-		switch chat.Server {
-		case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer, types.NewsletterServer:
-		default:
+		if kind == jidKindUnknown {
 			return mcp.InvalidArgumentError(
 				fmt.Sprintf("chat_jid %q is a @%s chat, which does not take read receipts", in.ChatJID, chat.Server)), nil
 		}
@@ -92,7 +97,7 @@ func markRead(deps Deps) mcp.Handler {
 			return mcp.InvalidArgumentError("sender_jid is required in group chats"), nil
 		}
 		if senderIn != "" {
-			parsed, err := resolveRecipient(senderIn)
+			parsed, _, err := chatTarget(senderIn)
 			if err != nil {
 				return mcp.InvalidArgumentError(fmt.Sprintf("sender_jid: %v", err)), nil
 			}
@@ -105,18 +110,18 @@ func markRead(deps Deps) mcp.Handler {
 		}
 
 		chatJID := chat.String()
-		if deps.Cache != nil {
-			if err := deps.Cache.SetChatUnread(ctx, chatJID, chat.Server == types.GroupServer, false); err != nil {
-				return mcp.InternalError(fmt.Sprintf("read receipt sent, but clearing the cached unread flag failed: %v", err)), nil
-			}
-		}
-
-		return MarkReadResult{
+		out := MarkReadResult{
 			ChatJID:    chatJID,
 			MessageIDs: ids,
 			Count:      len(ids),
 			ReadTS:     readAt.Unix(),
-		}, nil
+		}
+		if deps.Cache != nil {
+			if err := deps.Cache.SetChatUnread(ctx, chatJID, kind == jidKindGroup, false); err != nil {
+				out.CacheWarning = fmt.Sprintf("read receipt sent, but clearing the cached unread flag failed: %v; run cache_sync to reconcile", err)
+			}
+		}
+		return out, nil
 	}
 }
 

@@ -205,6 +205,18 @@ func TestSendChatPresence_RejectsAudioWithPaused(t *testing.T) {
 	}
 }
 
+func TestSendChatPresence_NotLoggedInMapsToNotPaired(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{chatPresenceErr: wa.ErrNotLoggedIn}
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "send_chat_presence", map[string]any{
+		"chat_jid": "111@s.whatsapp.net",
+		"state":    "composing",
+	})
+	expectError(t, res, mcp.ErrNotPaired)
+}
+
 func TestSendChatPresence_RejectsNewsletterChat(t *testing.T) {
 	t.Parallel()
 	mock := &mockWA{}
@@ -311,7 +323,82 @@ func TestSetDisappearingTimer_MapsEveryAllowedDuration(t *testing.T) {
 			if mock.timer != tc.want {
 				t.Errorf("forwarded %v, want %v", mock.timer, tc.want)
 			}
+			if got := mock.timerChat.String(); got != "111@s.whatsapp.net" {
+				t.Errorf("chat jid=%q, want 111@s.whatsapp.net", got)
+			}
 		})
+	}
+}
+
+// Same recipient grammar as send_message, including phone-number
+// normalisation and group JIDs passed straight through.
+func TestSetDisappearingTimer_NormalisesChatJID(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ in, want string }{
+		{"+34 600 111 222", "34600111222@s.whatsapp.net"},
+		{"120363000000000001@g.us", "120363000000000001@g.us"},
+		{"888@lid", "888@lid"},
+	} {
+		mock := &mockWA{}
+		h := newHarness(t, true, nil, mock)
+
+		res := callTool(t, h, "set_disappearing_timer", map[string]any{
+			"chat_jid": tc.in,
+			"duration": "24h",
+		})
+		if res.IsError {
+			t.Fatalf("%s: tool error: %+v", tc.in, res)
+		}
+		if got := mock.timerChat.String(); got != tc.want {
+			t.Errorf("%s: forwarded %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A legacy '…@c.us' address is the pre-multi-device spelling of a phone JID.
+// resolve_jid, get_contact_details and send_message all accept it, and
+// whatsmeow's own presence/timer/receipt calls only understand the modern
+// spelling — so these tools rewrite rather than reject it.
+func TestAccountOpTools_AcceptLegacyCUSAddress(t *testing.T) {
+	t.Parallel()
+	const legacy = "111@c.us"
+	const modern = "111@s.whatsapp.net"
+
+	mock := &mockWA{}
+	h := newHarness(t, true, nil, mock)
+
+	if res := callTool(t, h, "send_chat_presence", map[string]any{
+		"chat_jid": legacy, "state": "composing",
+	}); res.IsError {
+		t.Fatalf("send_chat_presence: %+v", res)
+	}
+	if got := mock.chatPresenceJID.String(); got != modern {
+		t.Errorf("send_chat_presence forwarded %q, want %q", got, modern)
+	}
+
+	if res := callTool(t, h, "subscribe_presence", map[string]any{"jid": legacy}); res.IsError {
+		t.Fatalf("subscribe_presence: %+v", res)
+	}
+	if got := mock.subscribedJID.String(); got != modern {
+		t.Errorf("subscribe_presence forwarded %q, want %q", got, modern)
+	}
+
+	if res := callTool(t, h, "set_disappearing_timer", map[string]any{
+		"chat_jid": legacy, "duration": "24h",
+	}); res.IsError {
+		t.Fatalf("set_disappearing_timer: %+v", res)
+	}
+	if got := mock.timerChat.String(); got != modern {
+		t.Errorf("set_disappearing_timer forwarded %q, want %q", got, modern)
+	}
+
+	if res := callTool(t, h, "mark_read", map[string]any{
+		"chat_jid": legacy, "message_ids": []any{"MSG1"},
+	}); res.IsError {
+		t.Fatalf("mark_read: %+v", res)
+	}
+	if got := mock.markReadChat.String(); got != modern {
+		t.Errorf("mark_read forwarded %q, want %q", got, modern)
 	}
 }
 
@@ -378,6 +465,15 @@ func TestSetDefaultDisappearingTimer_Forwards(t *testing.T) {
 	if mock.defaultTimer != 7*24*time.Hour {
 		t.Errorf("forwarded %v, want 168h", mock.defaultTimer)
 	}
+}
+
+func TestSetDefaultDisappearingTimer_NotLoggedInMapsToNotPaired(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{defaultTimerErr: wa.ErrNotLoggedIn}
+	h := newHarness(t, true, nil, mock)
+
+	res := callTool(t, h, "set_default_disappearing_timer", map[string]any{"duration": "off"})
+	expectError(t, res, mcp.ErrNotPaired)
 }
 
 func TestSetDefaultDisappearingTimer_RejectsUnsupportedDuration(t *testing.T) {
@@ -536,6 +632,66 @@ func TestMarkRead_FailedReceiptLeavesUnreadFlag(t *testing.T) {
 	expectError(t, res, mcp.ErrNotPaired)
 	if got := unreadCount(t, h, "111@s.whatsapp.net"); got != 1 {
 		t.Errorf("unread_count=%d, want 1 — the receipt never went out", got)
+	}
+}
+
+// The receipt is irreversible, so a failed cache write must not hide what was
+// acknowledged: the call still succeeds and reports the failure as a warning
+// alongside read_ts and message_ids.
+func TestMarkRead_CacheFailureWarnsButStillReportsTheReceipt(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{}
+	h := newHarness(t, true, seedUnreadChats, mock)
+
+	// Closing the store is the only way to make SetChatUnread fail through
+	// the real store the harness wires in. sql.DB.Close is idempotent, so
+	// the harness cleanup closing it again is fine.
+	if err := h.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	res := callTool(t, h, "mark_read", map[string]any{
+		"chat_jid":    "111@s.whatsapp.net",
+		"message_ids": []any{"MSG1", "MSG2"},
+	})
+	if res.IsError {
+		t.Fatalf("want success with a warning, got error: %+v", res)
+	}
+	s := structured(t, res)
+	warn, _ := s["cache_warning"].(string)
+	if warn == "" {
+		t.Fatalf("cache_warning is empty, want the failure reported (payload=%+v)", s)
+	}
+	if !strings.Contains(warn, "cache_sync") {
+		t.Errorf("cache_warning=%q, want it to name the recovery path", warn)
+	}
+	// The irreversible half must still be fully reported.
+	if got, _ := s["count"].(float64); int(got) != 2 {
+		t.Errorf("count=%v, want 2", got)
+	}
+	if got, _ := s["read_ts"].(float64); int64(got) == 0 {
+		t.Error("read_ts=0, want the receipt timestamp preserved")
+	}
+	if mock.markReadCalls != 1 {
+		t.Errorf("markReadCalls=%d, want 1", mock.markReadCalls)
+	}
+}
+
+// The happy path must not carry a warning field at all.
+func TestMarkRead_SuccessOmitsCacheWarning(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{}
+	h := newHarness(t, true, seedUnreadChats, mock)
+
+	res := callTool(t, h, "mark_read", map[string]any{
+		"chat_jid":    "111@s.whatsapp.net",
+		"message_ids": []any{"MSG1"},
+	})
+	if res.IsError {
+		t.Fatalf("tool error: %+v", res)
+	}
+	if _, present := structured(t, res)["cache_warning"]; present {
+		t.Error("cache_warning present on the happy path, want it omitted")
 	}
 }
 
