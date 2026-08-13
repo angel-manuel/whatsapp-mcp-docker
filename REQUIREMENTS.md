@@ -20,13 +20,20 @@ Design-wise the container is also intended to be safely embeddable behind an ext
 
 ## Tool surface
 
-41 tools, same names as the upstream reference, grouped for readability:
+41 tools, same names as the upstream reference, grouped for readability.
+
+> **This section is the target surface, not the shipped one.** Names below
+> without a ✅ are requirements still to be built. For what the binary
+> actually registers today, see [SUPPORTED.md](SUPPORTED.md) — the
+> authoritative source is `internal/tools/register.go`, `internal/mcptools/`,
+> and `internal/mcp/ping.go`.
 
 **Messages / chats (8)**
 `list_messages`, `list_chats`, `get_chat`, `get_direct_chat_by_contact`, `get_contact_chats`, `get_last_interaction`, `get_message_context`, `request_history`
 
 **Sending (4)**
-`send_message`, `send_file`, `send_audio_message`, `send_reaction`
+✅ `send_message` (text only — media envelopes not implemented). Planned, not
+yet implemented: `send_file`, `send_audio_message`, `send_reaction`.
 
 **Message editing / state (3)**
 `edit_message`, `delete_message`, `mark_read`
@@ -158,7 +165,7 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 | `AUTH_TOKEN` | *(unset)* | Required bearer token for every HTTP route (`/mcp` and `/media/`). REQUIRED in `http` mode. |
 | `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them in `http` mode is a fatal startup error. No TLS listener exists, so they never encrypted anything or verified a client certificate. If mTLS is ever built, it will be additive to `AUTH_TOKEN`, never a replacement. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Shown on the user's phone after pairing. |
-| `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Used by `send_audio_message`; absent → audio conversion disabled, Opus input required. |
+| `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Reserved for the not-yet-implemented audio-send path. Parsed into config today but read by nothing; once audio sending lands, absent → audio conversion disabled, Opus input required. |
 | `ENABLE_PPROF` | `false` | Exposes `/debug/pprof` when true. |
 | `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`. Over the cap, least-recently-requested blobs are evicted. `0` = unlimited. |
 | `MEDIA_TTL` | *(unset)* | Go duration; evicts media older than this. Unset/`0` disables age-based eviction. |
