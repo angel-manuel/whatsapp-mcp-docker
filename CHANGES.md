@@ -70,6 +70,37 @@ are strictly additive — clients that don't call them see no change.
   backfilled. Those calls fail with `media_unavailable` and a message
   telling the caller to run `cache_sync` and retry.
 
+## Sending tools
+
+### `send_reaction` — structured result, plus an optional `sender_jid`
+
+- **Reference**: `send_reaction(chat_jid, message_id, emoji)` returning
+  `{ success, chat_jid, message_id, emoji, action, error }`. The bridge
+  builds the reaction with **its own JID** as the target's sender
+  (`whatsapp-bridge/internal/whatsapp/messages.go:255`), so
+  `MessageKey.FromMe` is always true — reacting to someone else's message
+  in a group produces a misattributed key.
+- **Go**: same three arguments, plus an optional `sender_jid`. The
+  target message's author is resolved from the local cache (an explicit
+  `sender_jid` wins; a message we sent resolves to the empty JID, which
+  is whatsmeow's "this is mine" signal), so group reactions carry the
+  correct `MessageKey.FromMe`/`Participant`. A target that is neither
+  cached nor supplied returns `not_found` rather than being guessed at.
+  The result is `{ message_id, chat_jid, target_id, emoji, action,
+  sent_ts }` — `message_id` is the reaction stanza's own id and
+  `target_id` the message reacted to, which the reference conflated
+  into one field. `action` (`"add"` / `"remove"`) is preserved, as is
+  the empty-emoji removal convention. Failures use the structured error
+  codes (see §"Error surface") instead of `{ success: false, error }`.
+  Newsletter/channel chats are rejected with `invalid_argument`: they
+  need `NewsletterSendReaction` and a `MessageServerID` the cache does
+  not capture, so a normal reaction stanza would be silently dropped.
+- **Why**: the reference's key-building bug is invisible to the caller
+  and produces a wrong reaction on the wire; resolving the author is the
+  only correct way to build the key, and the cache already has it. The
+  split `message_id` / `target_id` is required to report the send at all
+  — a reaction has its own stanza id.
+
 ## Read-side tools (cache-backed)
 
 ### `list_chats` — list wrapped in object
@@ -98,6 +129,22 @@ are strictly additive — clients that don't call them see no change.
   behaviour. Stop-words and tokenizer differences may cause a Python
   LIKE match to differ from a Go FTS match at the margins; if that
   becomes a problem the FTS path can be made a LIKE fallback.
+
+### Every message-returning tool — additive `reactions` field
+
+- **Reference**: message dicts carry no reaction data; the Python
+  bridge does not ingest incoming reactions at all.
+- **Go**: `MessageDTO` gains `reactions`, a list of
+  `{ emoji, sender, sender_name, is_from_me }`, populated by
+  `list_messages`, `get_message_context`, `get_last_interaction`, and
+  `get_conversation` in a single batched query per call. The key is
+  omitted entirely when a message has no reactions, so existing clients
+  see a byte-identical payload for the common case. Our own reaction
+  reports an empty `sender` with `is_from_me: true` — the cache stores it
+  under a canonical empty sender key so the live, history-sync, and
+  `send_reaction` paths cannot produce duplicate rows.
+- **Why**: strictly additive. A reaction is often the only response a
+  message gets; without this an agent has to infer it or report nothing.
 
 ### `get_message_context`
 

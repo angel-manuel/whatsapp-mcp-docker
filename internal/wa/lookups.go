@@ -84,6 +84,23 @@ func (c *Client) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Messa
 	return wm.SendMessage(ctx, to, msg)
 }
 
+// BuildReaction constructs the reaction envelope for a message, ready to hand
+// to SendMessage. It is a passthrough to whatsmeow, which needs the *target
+// message's* author (not the reactor) to key the reaction: it compares sender
+// against the live own JID and own LID to decide MessageKey.FromMe, and fills
+// MessageKey.Participant for group chats. Pass an empty sender for a message
+// we sent ourselves.
+//
+// Returns nil when no whatsmeow client is available yet (pre-pair); callers
+// surface that as not_paired rather than sending a malformed stanza.
+func (c *Client) BuildReaction(chat, sender types.JID, id types.MessageID, emoji string) *waE2E.Message {
+	wm := c.snapshotWM()
+	if wm == nil {
+		return nil
+	}
+	return wm.BuildReaction(chat, sender, id, emoji)
+}
+
 // OwnJID returns the paired device's non-AD JID, or a zero JID when the
 // client has not been paired yet. Callers should treat the zero value as
 // "not available" rather than querying IsEmpty repeatedly.

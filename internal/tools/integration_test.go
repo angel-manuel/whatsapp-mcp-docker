@@ -17,9 +17,11 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
@@ -49,6 +51,16 @@ type mockWA struct {
 	sendCalls  int
 	lastSendTo types.JID
 	lastSendMs *waE2E.Message
+
+	// Reaction surface. buildReactionNil simulates the pre-pair case where
+	// whatsmeow has no client yet; the lastReaction* fields capture the
+	// arguments so tests can assert the target's author was resolved.
+	buildReactionNil   bool
+	buildReactionCalls int
+	lastReactionChat   types.JID
+	lastReactionSender types.JID
+	lastReactionTarget types.MessageID
+	lastReactionEmoji  string
 
 	// Sync surface used by cache_sync; defaults to logged-in + empty
 	// authoritative results so existing tests keep compiling.
@@ -112,6 +124,35 @@ func (m *mockWA) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message
 		return whatsmeow.SendResponse{}, m.sendErr
 	}
 	return m.sendResp, nil
+}
+
+// BuildReaction mirrors whatsmeow's own BuildReaction/BuildMessageKey
+// semantics closely enough to assert on: an empty (or own) sender means
+// FromMe, and a group chat additionally carries the participant.
+func (m *mockWA) BuildReaction(chat, sender types.JID, id types.MessageID, emoji string) *waE2E.Message {
+	m.buildReactionCalls++
+	m.lastReactionChat = chat
+	m.lastReactionSender = sender
+	m.lastReactionTarget = id
+	m.lastReactionEmoji = emoji
+	if m.buildReactionNil {
+		return nil
+	}
+	key := &waCommon.MessageKey{
+		FromMe:    proto.Bool(true),
+		ID:        proto.String(string(id)),
+		RemoteJID: proto.String(chat.String()),
+	}
+	if !sender.IsEmpty() && sender.User != m.ownJID.User {
+		key.FromMe = proto.Bool(false)
+		if chat.Server == types.GroupServer {
+			key.Participant = proto.String(sender.ToNonAD().String())
+		}
+	}
+	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+		Key:  key,
+		Text: proto.String(emoji),
+	}}
 }
 
 func (m *mockWA) OwnJID() types.JID { return m.ownJID }
@@ -599,7 +640,7 @@ func TestTools_NotPairedShortCircuits(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, false, seedContacts, &mockWA{})
 
-	for _, name := range []string{"search_contacts", "list_all_contacts", "get_contact_details", "resolve_jid", "get_group_info", "send_message", "cache_sync"} {
+	for _, name := range []string{"search_contacts", "list_all_contacts", "get_contact_details", "resolve_jid", "get_group_info", "send_message", "send_reaction", "cache_sync"} {
 		t.Run(name, func(t *testing.T) {
 			var args map[string]any
 			switch name {
@@ -611,6 +652,8 @@ func TestTools_NotPairedShortCircuits(t *testing.T) {
 				args = map[string]any{"group_jid": "xxx@g.us"}
 			case "send_message":
 				args = map[string]any{"recipient": "447700123456", "text": "hi"}
+			case "send_reaction":
+				args = map[string]any{"chat_jid": "447700123456", "message_id": "m1", "emoji": "👍"}
 			}
 			res := callTool(t, h, name, args)
 			if !res.IsError {
@@ -892,6 +935,7 @@ func TestTools_ListRegisteredToolsAdvertisesSchemas(t *testing.T) {
 		"resolve_jid":         false,
 		"get_group_info":      false,
 		"send_message":        false,
+		"send_reaction":       false,
 		"pairing_start":       false,
 		"pairing_complete":    false,
 	}
@@ -1039,3 +1083,216 @@ type readCloser struct{ io.ReadCloser }
 
 // Ensure errors.Is is available for any future test cases that need it.
 var _ = errors.Is
+
+// --- send_reaction integration tests ---
+
+// seedReactionTarget writes the message send_reaction reacts to: one sent by
+// someone else in a group, and one of our own in the same chat.
+func seedReactionTarget(t *testing.T, store *cache.Store) {
+	t.Helper()
+	ctx := context.Background()
+	ts := time.Unix(1_700_000_000, 0).UTC()
+	msgs := []cache.Message{
+		{ID: "m-theirs", ChatJID: "777@g.us", SenderJID: "111@s.whatsapp.net", Timestamp: ts, Kind: cache.KindText, Body: "morning"},
+		{ID: "m-mine", ChatJID: "777@g.us", SenderJID: "15551234567@s.whatsapp.net", Timestamp: ts, Kind: cache.KindText, Body: "ship it", IsFromMe: true},
+	}
+	for _, m := range msgs {
+		if err := store.InsertMessage(ctx, m); err != nil {
+			t.Fatalf("seed reaction target %s: %v", m.ID, err)
+		}
+	}
+}
+
+func newReactionHarness(t *testing.T, mock *mockWA) *testHarness {
+	t.Helper()
+	return newHarness(t, true, func(store *cache.Store) { seedReactionTarget(t, store) }, mock)
+}
+
+func TestSendReaction_Success_MirrorsIntoCache(t *testing.T) {
+	t.Parallel()
+	own := types.NewJID("15551234567", types.DefaultUserServer)
+	sentAt := time.Unix(1_700_100_000, 0).UTC()
+	mock := &mockWA{ownJID: own, sendResp: whatsmeow.SendResponse{ID: "3EBREACT", Timestamp: sentAt}}
+	h := newReactionHarness(t, mock)
+
+	res := callTool(t, h, "send_reaction", map[string]any{
+		"chat_jid":   "777@g.us",
+		"message_id": "m-theirs",
+		"emoji":      "👍",
+	})
+	if res.IsError {
+		t.Fatalf("tool error: %+v", res)
+	}
+	s := structured(t, res)
+	if s["message_id"] != "3EBREACT" {
+		t.Errorf("message_id=%v, want 3EBREACT", s["message_id"])
+	}
+	if s["target_id"] != "m-theirs" {
+		t.Errorf("target_id=%v, want m-theirs", s["target_id"])
+	}
+	if s["emoji"] != "👍" || s["action"] != "add" {
+		t.Errorf("emoji=%v action=%v, want 👍 / add", s["emoji"], s["action"])
+	}
+	if got, _ := s["sent_ts"].(float64); int64(got) != sentAt.Unix() {
+		t.Errorf("sent_ts=%v, want %d", got, sentAt.Unix())
+	}
+
+	// The reaction must be keyed off the *target's* author, not ours —
+	// otherwise it is attached to the wrong message in a group.
+	if mock.lastReactionSender.String() != "111@s.whatsapp.net" {
+		t.Errorf("BuildReaction sender=%s, want the target's author 111@s.whatsapp.net", mock.lastReactionSender)
+	}
+	key := mock.lastSendMs.GetReactionMessage().GetKey()
+	if key.GetFromMe() {
+		t.Error("reaction key FromMe=true for someone else's message")
+	}
+	if key.GetParticipant() != "111@s.whatsapp.net" {
+		t.Errorf("reaction key Participant=%q, want 111@s.whatsapp.net", key.GetParticipant())
+	}
+
+	var emoji, sender string
+	var isFromMe int
+	if err := h.store.DB().QueryRowContext(context.Background(),
+		`SELECT emoji, sender_jid, is_from_me FROM reactions WHERE chat_jid = ? AND target_id = ?`,
+		"777@g.us", "m-theirs").Scan(&emoji, &sender, &isFromMe); err != nil {
+		t.Fatalf("scan mirrored reaction: %v", err)
+	}
+	if emoji != "👍" || isFromMe != 1 || sender != "" {
+		t.Errorf("mirrored row: emoji=%q sender=%q is_from_me=%d; want 👍 / empty sender / 1", emoji, sender, isFromMe)
+	}
+}
+
+func TestSendReaction_OwnMessageUsesEmptySender(t *testing.T) {
+	t.Parallel()
+	own := types.NewJID("15551234567", types.DefaultUserServer)
+	mock := &mockWA{ownJID: own, sendResp: whatsmeow.SendResponse{ID: "3EBREACT2"}}
+	h := newReactionHarness(t, mock)
+
+	res := callTool(t, h, "send_reaction", map[string]any{
+		"chat_jid": "777@g.us", "message_id": "m-mine", "emoji": "🎉",
+	})
+	if res.IsError {
+		t.Fatalf("tool error: %+v", res)
+	}
+	// An empty sender is how whatsmeow is told the target is our own message.
+	if !mock.lastReactionSender.IsEmpty() {
+		t.Errorf("BuildReaction sender=%s, want empty for our own message", mock.lastReactionSender)
+	}
+	if !mock.lastSendMs.GetReactionMessage().GetKey().GetFromMe() {
+		t.Error("reaction key FromMe=false for our own message")
+	}
+}
+
+func TestSendReaction_EmptyEmojiRemovesMirroredRow(t *testing.T) {
+	t.Parallel()
+	own := types.NewJID("15551234567", types.DefaultUserServer)
+	mock := &mockWA{ownJID: own, sendResp: whatsmeow.SendResponse{ID: "3EBREACT3"}}
+	h := newReactionHarness(t, mock)
+
+	if res := callTool(t, h, "send_reaction", map[string]any{
+		"chat_jid": "777@g.us", "message_id": "m-theirs", "emoji": "👍",
+	}); res.IsError {
+		t.Fatalf("add: %+v", res)
+	}
+	res := callTool(t, h, "send_reaction", map[string]any{
+		"chat_jid": "777@g.us", "message_id": "m-theirs", "emoji": "",
+	})
+	if res.IsError {
+		t.Fatalf("remove: %+v", res)
+	}
+	if s := structured(t, res); s["action"] != "remove" {
+		t.Errorf("action=%v, want remove", s["action"])
+	}
+
+	var count int
+	if err := h.store.DB().QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM reactions WHERE chat_jid = ? AND target_id = ?`,
+		"777@g.us", "m-theirs").Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("reaction row still present after removal, count=%d", count)
+	}
+}
+
+func TestSendReaction_UncachedTargetIsNotFound(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{ownJID: types.NewJID("15551234567", types.DefaultUserServer)}
+	h := newReactionHarness(t, mock)
+
+	res := callTool(t, h, "send_reaction", map[string]any{
+		"chat_jid": "777@g.us", "message_id": "m-unknown", "emoji": "👍",
+	})
+	expectError(t, res, mcp.ErrNotFound)
+	if mock.sendCalls != 0 {
+		t.Errorf("SendMessage called %d times for an unresolvable target, want 0", mock.sendCalls)
+	}
+}
+
+func TestSendReaction_ExplicitSenderJIDOverridesCache(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{
+		ownJID:   types.NewJID("15551234567", types.DefaultUserServer),
+		sendResp: whatsmeow.SendResponse{ID: "3EBREACT4"},
+	}
+	h := newReactionHarness(t, mock)
+
+	// Not in the cache, but the caller knows the author.
+	res := callTool(t, h, "send_reaction", map[string]any{
+		"chat_jid": "777@g.us", "message_id": "m-unknown", "emoji": "👍",
+		"sender_jid": "222@s.whatsapp.net",
+	})
+	if res.IsError {
+		t.Fatalf("tool error: %+v", res)
+	}
+	if mock.lastReactionSender.String() != "222@s.whatsapp.net" {
+		t.Errorf("BuildReaction sender=%s, want the supplied 222@s.whatsapp.net", mock.lastReactionSender)
+	}
+}
+
+func TestSendReaction_RejectsNewsletterChat(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{ownJID: types.NewJID("15551234567", types.DefaultUserServer)}
+	h := newReactionHarness(t, mock)
+
+	res := callTool(t, h, "send_reaction", map[string]any{
+		"chat_jid": "123@newsletter", "message_id": "m1", "emoji": "👍",
+	})
+	expectError(t, res, mcp.ErrInvalidArgument)
+	if mock.sendCalls != 0 {
+		t.Errorf("SendMessage called %d times for a newsletter, want 0", mock.sendCalls)
+	}
+}
+
+func TestSendReaction_RejectsInvalidEmoji(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{ownJID: types.NewJID("15551234567", types.DefaultUserServer)}
+	h := newReactionHarness(t, mock)
+
+	for name, emoji := range map[string]string{
+		"whitespace": "   ",
+		"multiword":  "not an emoji",
+		"too long":   strings.Repeat("a", 65),
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := callTool(t, h, "send_reaction", map[string]any{
+				"chat_jid": "777@g.us", "message_id": "m-theirs", "emoji": emoji,
+			})
+			expectError(t, res, mcp.ErrInvalidArgument)
+		})
+	}
+}
+
+func TestSendReaction_NotLoggedInMapsToNotPaired(t *testing.T) {
+	t.Parallel()
+	mock := &mockWA{
+		ownJID:  types.NewJID("15551234567", types.DefaultUserServer),
+		sendErr: wa.ErrNotLoggedIn,
+	}
+	h := newReactionHarness(t, mock)
+
+	res := callTool(t, h, "send_reaction", map[string]any{
+		"chat_jid": "777@g.us", "message_id": "m-theirs", "emoji": "👍",
+	})
+	expectError(t, res, mcp.ErrNotPaired)
+}

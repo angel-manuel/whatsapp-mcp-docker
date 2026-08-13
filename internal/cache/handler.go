@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -138,6 +139,14 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 		}
 	}
 
+	// Reactions target an existing message rather than inserting a new row,
+	// and must not touch the chat: bumping last_message_ts would reorder the
+	// chat list and make list_chats report the reaction as the last message.
+	if react := evt.Message.GetReactionMessage(); react != nil {
+		i.handleReaction(ctx, evt, react, ts)
+		return
+	}
+
 	if err := i.store.UpsertChat(ctx, Chat{
 		JID:           chatJID,
 		IsGroup:       evt.Info.IsGroup,
@@ -168,6 +177,69 @@ func (i *Ingestor) handleMessage(ctx context.Context, evt *events.Message) {
 	if err := i.store.InsertMessage(ctx, *msg); err != nil {
 		i.logger.Warn("cache: insert message",
 			slog.String("chat_jid", chatJID), slog.String("message_id", evt.Info.ID), slog.String("err", err.Error()))
+	}
+}
+
+// handleReaction persists an emoji reaction carried in a ReactionMessage
+// envelope. An empty Text is WhatsApp's "remove my reaction" signal, so it
+// deletes the row instead of storing an empty emoji.
+//
+// The reactor's contact and lid<->phone alias are recorded exactly as they are
+// on the message path, since a reaction is often the first (or only) thing a
+// given identity sends us. The chat row is deliberately left alone — see the
+// call site in handleMessage.
+func (i *Ingestor) handleReaction(ctx context.Context, evt *events.Message, react *waE2E.ReactionMessage, fallbackTS time.Time) {
+	key := react.GetKey()
+	if key == nil || key.GetID() == "" {
+		return
+	}
+	chatJID := evt.Info.Chat.String()
+	if remote := key.GetRemoteJID(); remote != "" {
+		chatJID = remote
+	}
+	senderJID := evt.Info.Sender.ToNonAD().String()
+
+	if senderJID != "" && !evt.Info.IsFromMe {
+		if err := i.store.UpsertContact(ctx, Contact{JID: senderJID, PushName: evt.Info.PushName}); err != nil {
+			i.logger.Warn("cache: upsert reaction contact", slog.String("jid", senderJID), slog.String("err", err.Error()))
+		}
+	}
+	i.recordJIDAlias(ctx, evt.Info.Sender, evt.Info.SenderAlt)
+
+	// The reaction carries its own timestamp, which is what orders competing
+	// reactions from the same sender; the envelope time is only a fallback.
+	ts := fallbackTS
+	if ms := react.GetSenderTimestampMS(); ms > 0 {
+		ts = time.UnixMilli(ms)
+	}
+
+	i.persistReaction(ctx, Reaction{
+		ChatJID:   chatJID,
+		TargetID:  key.GetID(),
+		SenderJID: senderJID,
+		Emoji:     react.GetText(),
+		Timestamp: ts,
+		IsFromMe:  evt.Info.IsFromMe,
+	})
+}
+
+// persistReaction writes one reaction row, routing the empty-emoji removal to
+// a delete. Shared by the live and history-sync ingest paths; failures are
+// logged and swallowed like every other ingest write.
+func (i *Ingestor) persistReaction(ctx context.Context, r Reaction) {
+	if r.ChatJID == "" || r.TargetID == "" {
+		return
+	}
+	if r.Emoji == "" {
+		if err := i.store.DeleteReaction(ctx, r.ChatJID, r.TargetID, ReactionSenderKey(r.SenderJID, r.IsFromMe)); err != nil {
+			i.logger.Warn("cache: delete reaction",
+				slog.String("chat_jid", r.ChatJID), slog.String("target_id", r.TargetID), slog.String("err", err.Error()))
+		}
+		return
+	}
+	if err := i.store.UpsertReaction(ctx, r); err != nil {
+		i.logger.Warn("cache: upsert reaction",
+			slog.String("chat_jid", r.ChatJID), slog.String("target_id", r.TargetID), slog.String("err", err.Error()))
 	}
 }
 
@@ -267,14 +339,17 @@ func (i *Ingestor) handleHistorySync(ctx context.Context, evt *events.HistorySyn
 			} else {
 				senderJID = chatJIDStr
 			}
-			row := buildMessageRow(chatJIDStr, senderJID, key.GetID(), web.GetPushName(), rowTS, key.GetFromMe(), web.GetMessage())
-			if row == nil {
-				continue
+			// A nil row means an envelope kind we don't surface. Its
+			// reactions are still worth keeping, so they are ingested
+			// below regardless.
+			if row := buildMessageRow(chatJIDStr, senderJID, key.GetID(), web.GetPushName(), rowTS, key.GetFromMe(), web.GetMessage()); row != nil {
+				if err := i.store.InsertMessage(ctx, *row); err != nil {
+					i.logger.Warn("cache: history insert message",
+						slog.String("chat_jid", chatJIDStr), slog.String("message_id", key.GetID()), slog.String("err", err.Error()))
+				}
 			}
-			if err := i.store.InsertMessage(ctx, *row); err != nil {
-				i.logger.Warn("cache: history insert message",
-					slog.String("chat_jid", chatJIDStr), slog.String("message_id", key.GetID()), slog.String("err", err.Error()))
-			}
+
+			i.ingestHistoryReactions(ctx, chatJIDStr, key.GetID(), rowTS, web.GetReactions())
 		}
 
 		chat := Chat{JID: chatJIDStr, IsGroup: chatJID.Server == types.GroupServer, LastMessageTS: latestTS}
@@ -289,6 +364,45 @@ func (i *Ingestor) handleHistorySync(ctx context.Context, evt *events.HistorySyn
 		if err := i.store.UpsertChat(ctx, chat); err != nil {
 			i.logger.Warn("cache: history upsert chat", slog.String("chat_jid", chatJIDStr), slog.String("err", err.Error()))
 		}
+	}
+}
+
+// ingestHistoryReactions persists the reactions history sync attaches to a
+// message. Unlike a live ReactionMessage — where the envelope's own sender is
+// the reactor — here each reaction carries its own key, and the *enclosing*
+// message id is the target.
+func (i *Ingestor) ingestHistoryReactions(ctx context.Context, chatJID, targetID string, fallbackTS time.Time, reactions []*waWeb.Reaction) {
+	for _, react := range reactions {
+		if react == nil {
+			continue
+		}
+		key := react.GetKey()
+		if key == nil {
+			continue
+		}
+		senderJID := ""
+		if part := key.GetParticipant(); part != "" {
+			if pj, err := types.ParseJID(part); err == nil {
+				senderJID = pj.ToNonAD().String()
+			} else {
+				senderJID = part
+			}
+		} else if !key.GetFromMe() {
+			// A 1:1 chat carries no participant; the other party is the chat.
+			senderJID = chatJID
+		}
+		ts := fallbackTS
+		if ms := react.GetSenderTimestampMS(); ms > 0 {
+			ts = time.UnixMilli(ms)
+		}
+		i.persistReaction(ctx, Reaction{
+			ChatJID:   chatJID,
+			TargetID:  targetID,
+			SenderJID: senderJID,
+			Emoji:     react.GetText(),
+			Timestamp: ts,
+			IsFromMe:  key.GetFromMe(),
+		})
 	}
 }
 

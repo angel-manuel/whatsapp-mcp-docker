@@ -39,6 +39,7 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Any recipient → readable identity            | `resolve_jid`         | cache only (`GetGroupInfo` only for an unnamed group)         |
 | Authoritative group metadata                 | `get_group_info`      | `GetGroupInfo`                                                |
 | Send text message                            | `send_message`        | `SendMessage` (text only)                                     |
+| React to a message with an emoji             | `send_reaction`       | `BuildReaction` + `SendMessage`                               |
 | Download a message attachment                | `download_media`      | `DownloadMediaWithPath`, `Download` (URL fallback)            |
 | Start a pair flow                            | `pairing_start`       | `StartPairing`, `PairPhone`                                   |
 | Poll an in-progress pair flow                | `pairing_complete`    | `PairWaitNext` / `PairLatest`                                 |
@@ -64,6 +65,15 @@ events arrive.
 | `*events.Pin`               | pinned flag                                    |
 | `*events.Archive`           | archived flag                                  |
 | `*events.Star`              | chat row only (no `messages.starred` yet)      |
+
+A `*events.Message` carrying a `ReactionMessage` is persisted to the `reactions`
+table (migration `005`) rather than as a message row, keyed by
+`(chat_jid, target_id, sender_jid)` — WhatsApp allows one reaction per person
+per message, a new emoji replaces it, and an empty emoji removes it. Reactions
+deliberately do not bump `chats.last_message_ts`. `*events.HistorySync` also
+backfills the reactions attached to each synced message. Our own reactions are
+stored under a canonical empty sender so the live, history-sync, and
+`send_reaction` paths cannot produce duplicate rows.
 
 Media envelopes additionally persist `media_direct_path` (migration `004`),
 which is what `download_media` needs to re-request the CDN object after the
@@ -100,7 +110,6 @@ is genuinely uncalled.
 | whatsmeow                                           | Notes                                                              |
 | --------------------------------------------------- | ------------------------------------------------------------------ |
 | ⭐ `SendMessage` for media envelopes                | image/video/audio/document/sticker. Today only text is supported. |
-| ⭐ `BuildReaction` + `SendMessage`                  | react with an emoji.                                               |
 | ⭐ `RevokeMessage` (`BuildRevoke` + send)           | delete-for-everyone.                                               |
 | ⭐ `BuildEdit` + `SendMessage`                      | edit a previously sent message.                                    |
 | `BuildPollCreation` + `BuildPollVote`               | polls.                                                             |
@@ -123,7 +132,7 @@ is genuinely uncalled.
 | `GetNewsletterMessages`                  | fetch messages directly from the channel feed.                         |
 | `GetNewsletterMessageUpdates`            | poll for updates.                                                      |
 | `NewsletterMarkViewed`                   | mark a newsletter message as viewed.                                   |
-| `NewsletterSendReaction`                 | react to a newsletter message.                                         |
+| `NewsletterSendReaction`                 | react to a newsletter message. `send_reaction` rejects `@newsletter` targets: this needs a `MessageServerID` the cache does not capture. |
 | `NewsletterToggleMute`                   | mute/unmute.                                                           |
 | `NewsletterSubscribeLiveUpdates`         | live-mode subscription.                                                |
 | `CreateNewsletter`                       | author your own channel.                                               |

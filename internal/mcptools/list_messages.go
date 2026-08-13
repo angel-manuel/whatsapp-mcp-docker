@@ -215,6 +215,9 @@ LIMIT ? OFFSET ?`, messageSenderNameColumns, fromClause, whereSQL)
 	if err := rows.Err(); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return mcp.InternalError(fmt.Sprintf("list_messages rows: %v", err)), nil
 	}
+	if err := attachReactions(ctx, store, out.Messages); err != nil {
+		return mcp.InternalError(fmt.Sprintf("list_messages reactions: %v", err)), nil
+	}
 	return out, nil
 }
 

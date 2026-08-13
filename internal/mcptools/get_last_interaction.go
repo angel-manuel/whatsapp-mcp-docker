@@ -103,5 +103,11 @@ LIMIT 1`
 	if err != nil {
 		return mcp.InternalError(fmt.Sprintf("get_last_interaction scan: %v", err)), nil
 	}
-	return dto, nil
+	// attachReactions works on a slice; the one-element window is the whole
+	// result here.
+	one := []MessageDTO{dto}
+	if err := attachReactions(ctx, store, one); err != nil {
+		return mcp.InternalError(fmt.Sprintf("get_last_interaction reactions: %v", err)), nil
+	}
+	return one[0], nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -166,5 +167,53 @@ func mustExec(t *testing.T, store *Store, query string, args ...any) {
 	t.Helper()
 	if _, err := store.DB().ExecContext(context.Background(), query, args...); err != nil {
 		t.Fatalf("exec %q: %v", query, err)
+	}
+}
+
+// TestMigrate_ReactionsUpgradeFromPre005 covers the upgrade path a deployed
+// cache.db actually takes: it already holds data at version 4 and gains the
+// reactions table on the next start.
+func TestMigrate_ReactionsUpgradeFromPre005(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	tableCount := func() int {
+		t.Helper()
+		var n int
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reactions'`).Scan(&n); err != nil {
+			t.Fatalf("count reactions table: %v", err)
+		}
+		return n
+	}
+
+	if tableCount() != 1 {
+		t.Fatal("reactions table missing at head")
+	}
+
+	if err := store.MigrateDown(ctx, 4); err != nil {
+		t.Fatalf("MigrateDown(4): %v", err)
+	}
+	if tableCount() != 0 {
+		t.Fatal("reactions table survived the down migration")
+	}
+
+	// Pre-existing data at v4 must not block the upgrade.
+	if err := store.InsertMessage(ctx, Message{
+		ID: "m1", ChatJID: "c@s", SenderJID: "u@s", Timestamp: time.Unix(1_700_000_000, 0), Kind: KindText, Body: "hi",
+	}); err != nil {
+		t.Fatalf("insert at v4: %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("re-Migrate to head: %v", err)
+	}
+	if tableCount() != 1 {
+		t.Fatal("reactions table not recreated by the up migration")
+	}
+	if err := store.UpsertReaction(ctx, Reaction{
+		ChatJID: "c@s", TargetID: "m1", SenderJID: "u@s", Emoji: "👍", Timestamp: time.Unix(1_700_000_100, 0),
+	}); err != nil {
+		t.Fatalf("upsert after upgrade: %v", err)
 	}
 }

@@ -1181,3 +1181,126 @@ func TestGetContactChats_UntitledDirectFallsBackToContactName(t *testing.T) {
 		t.Errorf("Hal chats = %v, want one chat with name=null", halChats)
 	}
 }
+
+// seedReactions adds reactions to the group fixture: two on m-g-1 (one from
+// Alice, one of ours) and none anywhere else, so tests can assert both the
+// populated and the omitted case.
+func seedReactions(t *testing.T, s *cache.Store) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.UpsertContact(ctx, cache.Contact{JID: jidAlice, FullName: "Alice Anderson"}); err != nil {
+		t.Fatalf("seed reaction contact: %v", err)
+	}
+	rs := []cache.Reaction{
+		{ChatJID: jidGroup, TargetID: "m-g-1", SenderJID: jidAlice, Emoji: "👍", Timestamp: tsGroup2},
+		{ChatJID: jidGroup, TargetID: "m-g-1", Emoji: "🎉", Timestamp: tsGroup3, IsFromMe: true},
+		{ChatJID: jidGroup, TargetID: "m-g-2", SenderJID: jidBob, Emoji: "😂", Timestamp: tsGroup3},
+	}
+	for _, r := range rs {
+		if err := s.UpsertReaction(ctx, r); err != nil {
+			t.Fatalf("seed reaction %s/%s: %v", r.TargetID, r.Emoji, err)
+		}
+	}
+}
+
+// messageByID picks one message out of a list_messages-style array.
+func messageByID(t *testing.T, msgs []any, id string) map[string]any {
+	t.Helper()
+	for _, m := range msgs {
+		mm := m.(map[string]any)
+		if mm["id"] == id {
+			return mm
+		}
+	}
+	t.Fatalf("message %q not in result", id)
+	return nil
+}
+
+func TestListMessages_SurfacesReactions(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedReactions(t, s) })
+
+	out := callTool(t, c, "list_messages", map[string]any{"chat_jid": jidGroup})
+	msgs := out["messages"].([]any)
+
+	target := messageByID(t, msgs, "m-g-1")
+	reactions, ok := target["reactions"].([]any)
+	if !ok {
+		t.Fatalf("m-g-1 has no reactions array: %+v", target)
+	}
+	if len(reactions) != 2 {
+		t.Fatalf("len(reactions) = %d, want 2", len(reactions))
+	}
+	// Ordered by reaction timestamp: Alice's 👍 then our own 🎉.
+	alice := reactions[0].(map[string]any)
+	if alice["emoji"] != "👍" {
+		t.Errorf("reactions[0].emoji = %v, want 👍", alice["emoji"])
+	}
+	if alice["sender"] != jidAlice {
+		t.Errorf("reactions[0].sender = %v, want %v", alice["sender"], jidAlice)
+	}
+	if alice["sender_name"] != "Alice Anderson" {
+		t.Errorf("reactions[0].sender_name = %v, want Alice Anderson", alice["sender_name"])
+	}
+	if alice["is_from_me"] != false {
+		t.Errorf("reactions[0].is_from_me = %v, want false", alice["is_from_me"])
+	}
+
+	mine := reactions[1].(map[string]any)
+	if mine["emoji"] != "🎉" {
+		t.Errorf("reactions[1].emoji = %v, want 🎉", mine["emoji"])
+	}
+	if mine["is_from_me"] != true {
+		t.Errorf("reactions[1].is_from_me = %v, want true", mine["is_from_me"])
+	}
+	// Our own reaction is stored under the canonical empty sender.
+	if mine["sender"] != "" {
+		t.Errorf("reactions[1].sender = %v, want empty", mine["sender"])
+	}
+	if mine["sender_name"] != nil {
+		t.Errorf("reactions[1].sender_name = %v, want null", mine["sender_name"])
+	}
+}
+
+func TestListMessages_OmitsReactionsWhenNone(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedReactions(t, s) })
+
+	out := callTool(t, c, "list_messages", map[string]any{"chat_jid": jidGroup})
+	msgs := out["messages"].([]any)
+
+	unreacted := messageByID(t, msgs, "m-g-3")
+	if _, present := unreacted["reactions"]; present {
+		t.Errorf("m-g-3 carries a reactions key; want it omitted entirely: %+v", unreacted)
+	}
+}
+
+func TestGetMessageContext_SurfacesReactionsAcrossWindow(t *testing.T) {
+	t.Parallel()
+	c := newServerAndClientWithExtras(t, func(s *cache.Store) { seedReactions(t, s) })
+
+	// Target m-g-2 (reacted by Bob); m-g-1 sits in the before-window and has
+	// two reactions of its own.
+	out := callTool(t, c, "get_message_context", map[string]any{"message_id": "m-g-2"})
+
+	target := out["message"].(map[string]any)
+	targetReactions, ok := target["reactions"].([]any)
+	if !ok || len(targetReactions) != 1 {
+		t.Fatalf("target reactions = %+v, want 1", target["reactions"])
+	}
+	if targetReactions[0].(map[string]any)["emoji"] != "😂" {
+		t.Errorf("target reaction emoji = %v, want 😂", targetReactions[0].(map[string]any)["emoji"])
+	}
+
+	before := out["before"].([]any)
+	prev := messageByID(t, before, "m-g-1")
+	if got, ok := prev["reactions"].([]any); !ok || len(got) != 2 {
+		t.Errorf("before m-g-1 reactions = %+v, want 2", prev["reactions"])
+	}
+
+	after := out["after"].([]any)
+	next := messageByID(t, after, "m-g-3")
+	if _, present := next["reactions"]; present {
+		t.Errorf("after m-g-3 carries reactions; want omitted: %+v", next)
+	}
+}

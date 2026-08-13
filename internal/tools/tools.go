@@ -31,6 +31,10 @@ type WAClient interface {
 	IsOnWhatsApp(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error)
 	ProfilePictureURL(ctx context.Context, jid types.JID) (string, error)
 	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error)
+	// BuildReaction builds the reaction envelope for SendMessage. sender is
+	// the *target message's* author (empty for our own message), which is
+	// what whatsmeow keys the reaction off. Returns nil pre-pair.
+	BuildReaction(chat, sender types.JID, id types.MessageID, emoji string) *waE2E.Message
 	OwnJID() types.JID
 
 	// Whatsmeow exposes the raw client for surfaces this interface does

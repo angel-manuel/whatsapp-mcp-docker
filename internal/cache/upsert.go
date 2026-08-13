@@ -271,6 +271,74 @@ UPDATE messages
 	return nil
 }
 
+// UpsertReaction records a reaction, replacing any previous reaction the same
+// sender left on the same message. The ts guard makes out-of-order delivery a
+// no-op rather than a regression: a stale reaction arriving after a newer one
+// leaves the newer row alone.
+//
+// Our own reactions are stored under the canonical empty sender (see
+// ReactionSenderKey), so the three paths that can report them — live event,
+// history sync, and the send_reaction mirror — collapse to one row.
+//
+// Callers must not use this for removals — an empty emoji is not a stored
+// state; use DeleteReaction instead.
+func (s *Store) UpsertReaction(ctx context.Context, r Reaction) error {
+	if r.ChatJID == "" || r.TargetID == "" {
+		return errors.New("cache: UpsertReaction: ChatJID and TargetID required")
+	}
+	if r.Emoji == "" {
+		return errors.New("cache: UpsertReaction: Emoji required (use DeleteReaction to remove)")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO reactions (chat_jid, target_id, sender_jid, emoji, ts, is_from_me)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(chat_jid, target_id, sender_jid) DO UPDATE SET
+    emoji      = excluded.emoji,
+    ts         = excluded.ts,
+    is_from_me = excluded.is_from_me
+ WHERE excluded.ts >= reactions.ts
+`, r.ChatJID, r.TargetID, ReactionSenderKey(r.SenderJID, r.IsFromMe), r.Emoji,
+		unixSeconds(r.Timestamp), boolToInt(r.IsFromMe))
+	if err != nil {
+		return fmt.Errorf("cache: upsert reaction %s/%s by %s: %w", r.ChatJID, r.TargetID, r.SenderJID, err)
+	}
+	return nil
+}
+
+// ReactionSenderKey normalises the reactions.sender_jid value. Our own
+// reactions are always keyed by the empty string rather than by our JID.
+//
+// Unlike messages — whose primary key is (chat_jid, id) — a reaction's key
+// includes the sender, so any disagreement about how to spell "me" produces a
+// duplicate row. History sync in particular cannot name our JID at all (it
+// falls back to the chat JID, as the message path already does), so a single
+// canonical empty slot is the only spelling all ingest paths can agree on.
+// is_from_me carries the meaning.
+func ReactionSenderKey(senderJID string, isFromMe bool) string {
+	if isFromMe {
+		return ""
+	}
+	return senderJID
+}
+
+// DeleteReaction removes a sender's reaction from a message. Pass the
+// normalised sender (see ReactionSenderKey) — the empty string removes our own
+// reaction. Removing a reaction that was never stored is not an error:
+// WhatsApp re-delivers removals, and the desired end state (no row) holds.
+func (s *Store) DeleteReaction(ctx context.Context, chatJID, targetID, senderJID string) error {
+	if chatJID == "" || targetID == "" {
+		return errors.New("cache: DeleteReaction: chatJID and targetID required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM reactions
+ WHERE chat_jid = ? AND target_id = ? AND sender_jid = ?
+`, chatJID, targetID, senderJID)
+	if err != nil {
+		return fmt.Errorf("cache: delete reaction %s/%s by %s: %w", chatJID, targetID, senderJID, err)
+	}
+	return nil
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
