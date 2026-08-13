@@ -10,15 +10,18 @@ MCP transport, pairing, session persistence — runs in **one Go process**
 inside **one Docker image**. No sidecars, no compose bundle, no second
 language runtime.
 
-Today the server ships **25 MCP tools**: cache-backed read tools for
+Today the server ships **32 MCP tools**: cache-backed read tools for
 chats and messages, plus `send_message`, `send_reaction`, polls
 (`send_poll` / `vote_poll` / `get_poll_results`), `download_media`,
 contact / group lookups, `resolve_jid` (any recipient → readable identity),
 `cache_sync` / `cache_sync_status`, the `ping` health
 check, and the native `pairing_start` / `pairing_complete` tools that let
-an agent drive the link flow over MCP itself. The full coverage matrix —
-including whatsmeow capabilities not yet exposed — lives in
-[SUPPORTED.md](SUPPORTED.md).
+an agent drive the link flow over MCP itself. A further set of tools
+mutates account-visible state — the `About` text, online and per-chat
+typing presence, disappearing-message timers, and read receipts — so an
+agent can look like a real participant rather than a silent reader. The
+full coverage matrix — including whatsmeow capabilities not yet exposed —
+lives in [SUPPORTED.md](SUPPORTED.md).
 
 > ⚠️ **Unofficial.** This project uses `whatsmeow`, an unofficial
 > reimplementation of the WhatsApp protocol. Use at your own risk;
@@ -164,7 +167,7 @@ Attachments cached before the `media_direct_path` column existed (migration
 
 ## Tools
 
-Tools shipping today (25):
+Tools shipping today (32):
 
 - **Cache-backed reads** — `list_chats`, `list_conversations`, `get_chat`,
   `list_messages`, `get_message_context`, `get_last_interaction`,
@@ -179,6 +182,10 @@ Tools shipping today (25):
   the container was down) are not counted.
 - **Media** — `download_media` (returns a descriptor; bytes come from
   `GET /media/<sha256>`)
+- **Account & presence** (all of these are visible to other WhatsApp
+  users) — `set_status_message`, `send_presence`, `send_chat_presence`,
+  `subscribe_presence`, `set_disappearing_timer`,
+  `set_default_disappearing_timer`, `mark_read`
 - **Native** — `ping`, `cache_sync`, `cache_sync_status`, `pairing_start`,
   `pairing_complete`
 
@@ -186,9 +193,13 @@ Every tool that returns messages also reports the emoji reactions on
 them (`reactions`, omitted when there are none), populated from reaction
 events as they arrive and backfilled from history sync.
 
+Presence a `subscribe_presence` call asks for arrives asynchronously and is
+cached against the contact; read it back through `get_contact_details`
+(`presence_observed`, `is_online`, `last_seen_ts`).
+
 For the full picture — including the long list of `whatsmeow`
 capabilities not yet exposed (media send, edits, group
-admin, newsletters, presence, privacy/blocklist, …) — see
+admin, newsletters, privacy/blocklist, …) — see
 [SUPPORTED.md](SUPPORTED.md). Intentional divergences from the prior
 Python reference's argument shapes are tracked in
 [CHANGES.md](CHANGES.md).

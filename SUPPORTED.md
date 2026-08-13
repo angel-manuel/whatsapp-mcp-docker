@@ -44,9 +44,27 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Vote on / withdraw from a poll               | `vote_poll`           | `BuildPollVote` + `SendMessage`                               |
 | Read a poll's tally                          | `get_poll_results`    | cache only (votes accumulated from `DecryptPollVote`)         |
 | Download a message attachment                | `download_media`      | `DownloadMediaWithPath`, `Download` (URL fallback)            |
+| Set the account's "About" text               | `set_status_message`  | `SetStatusMessage`                                            |
+| Publish global online / offline presence     | `send_presence`       | `SendPresence`                                                |
+| Per-chat typing / recording indicator        | `send_chat_presence`  | `SendChatPresence`                                            |
+| Subscribe to a user's presence               | `subscribe_presence`  | `SubscribePresence` (the resulting `*events.Presence` are ingested onto the contact row and read back via `get_contact_details`) |
+| Per-chat disappearing-message timer          | `set_disappearing_timer` | `SetDisappearingTimer` (`off` / `24h` / `7d` / `90d` only) |
+| Account-wide default disappearing timer      | `set_default_disappearing_timer` | `SetDefaultDisappearingTimer` (`off` / `24h` / `7d` / `90d` only) |
+| Send read receipts                           | `mark_read`           | `MarkRead` (also clears the chat's cached unread flag)        |
 | Start a pair flow                            | `pairing_start`       | `StartPairing`, `PairPhone`                                   |
 | Poll an in-progress pair flow                | `pairing_complete`    | `PairWaitNext` / `PairLatest`                                 |
 | Reconcile the cache against the server       | `cache_sync`          | `GetJoinedGroups`, `GetSubscribedNewsletters`, `FetchAppState` |
+
+`set_status_message`, `send_presence`, `send_chat_presence`,
+`subscribe_presence`, `set_disappearing_timer`,
+`set_default_disappearing_timer` and `mark_read` mutate state other WhatsApp
+users can see (or, for `subscribe_presence`, register server-side activity
+under this account). Each says so in its tool description and validates
+strictly before calling whatsmeow: the presence and chat-state enums, the
+139-character `About` limit, and the four disappearing-message timers
+WhatsApp actually honours (`off`, `24h`, `7d`, `90d` — whatsmeow itself will
+forward any duration, which official clients then ignore and the server
+rejects in groups).
 
 ### Cache ingestion (no tool — runs from the dispatcher)
 
@@ -68,6 +86,7 @@ events arrive.
 | `*events.Pin`               | pinned flag                                    |
 | `*events.Archive`           | archived flag                                  |
 | `*events.Star`              | chat row only (no `messages.starred` yet)      |
+| `*events.Presence`          | contact presence columns (migration `007`)     |
 | `*events.Message` (poll creation) | `poll` message row + `polls` / `poll_options` ballot (migration `006`) |
 | `*events.Message` (poll update)   | decrypted via `DecryptPollVote` into `poll_votes` (migration `006`); no message row |
 
@@ -93,6 +112,12 @@ which is what `download_media` needs to re-request the CDN object after the
 pre-signed `media_url` expires. It is captured at ingest and cannot be
 backfilled — rows older than that migration must be re-ingested via
 `cache_sync` before their media can be downloaded.
+
+`*events.Presence` only arrives for JIDs `subscribe_presence` asked for, and
+only while this device is itself marked available, so the presence columns
+added by migration `007` stay at their defaults for every other contact.
+`get_contact_details` reports that as `presence_observed: false` rather than
+as a contact who is offline.
 
 ### HTTP routes (not MCP)
 
@@ -125,12 +150,6 @@ is genuinely uncalled.
 | ⭐ `SendMessage` for media envelopes                | image/video/audio/document/sticker. Today only text is supported. |
 | ⭐ `RevokeMessage` (`BuildRevoke` + send)           | delete-for-everyone.                                               |
 | ⭐ `BuildEdit` + `SendMessage`                      | edit a previously sent message.                                    |
-| `MarkRead`                                          | send read receipts.                                                |
-| `SendChatPresence`                                  | typing / recording / paused indicator.                             |
-| `SendPresence`                                      | global online/offline.                                             |
-| `SubscribePresence`                                 | get notified when a JID comes online.                              |
-| `SetDisappearingTimer`                              | per-chat ephemerals.                                               |
-| `SetDefaultDisappearingTimer`                       | account-wide default.                                              |
 
 ### Newsletter / channel management
 
@@ -205,12 +224,6 @@ is genuinely uncalled.
 | `GetBlocklist` / `UpdateBlocklist`         | block / unblock.                                   |
 | `GetStatusPrivacy`                         | who can see your status.                           |
 | `TryFetchPrivacySettings`                  | (variant; usually paired with the getter).         |
-
-### Profile / status
-
-| whatsmeow            | Notes                |
-| -------------------- | -------------------- |
-| `SetStatusMessage`   | your "About" string. |
 
 ### Sync / history (orchestration)
 

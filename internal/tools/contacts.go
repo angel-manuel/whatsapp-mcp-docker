@@ -55,6 +55,19 @@ type ContactDetails struct {
 	Status            string `json:"status"`
 	ProfilePictureURL string `json:"profile_picture_url,omitempty"`
 	IsOnWhatsApp      bool   `json:"is_on_whatsapp"`
+	// PresenceObserved reports whether any presence update has ever been
+	// ingested for this contact. It is false unless subscribe_presence was
+	// called for them — WhatsApp pushes presence only for explicit
+	// subscriptions — and the three fields below are meaningless when it is.
+	PresenceObserved bool `json:"presence_observed"`
+	// IsOnline is the availability last observed. PresenceUpdatedTS says how
+	// stale that observation is: the server stops pushing updates while this
+	// device is offline, so a long-untouched `true` is not proof of anything.
+	IsOnline          bool  `json:"is_online"`
+	PresenceUpdatedTS int64 `json:"presence_updated_ts,omitempty"`
+	// LastSeenTS is omitted when the contact hides their last-seen time,
+	// which is independent of whether presence was observed at all.
+	LastSeenTS int64 `json:"last_seen_ts,omitempty"`
 }
 
 var searchContactsSchema = json.RawMessage(`{
@@ -200,6 +213,21 @@ func getContactDetails(deps Deps) mcp.Handler {
 			}
 		}
 
+		// Presence, if anything has ever subscribed to it. Keyed on whichever
+		// identity the *events.Presence arrived under, so both are tried.
+		presence, err := lookupPresence(ctx, deps.Cache, identities)
+		if err != nil {
+			return mcp.ErrorResult(mcp.ErrInternal, err.Error()), nil
+		}
+		if presence.Observed {
+			details.PresenceObserved = true
+			details.IsOnline = presence.Online
+			details.PresenceUpdatedTS = presence.UpdatedAt.Unix()
+			if !presence.LastSeen.IsZero() {
+				details.LastSeenTS = presence.LastSeen.Unix()
+			}
+		}
+
 		// USync for status + LID + profile picture. Only user JIDs support
 		// this; for group / broadcast / newsletter JIDs we short-circuit
 		// the USync call.
@@ -303,6 +331,22 @@ func contactIdentities(jid, phoneJID types.JID, hasPhone bool) []types.JID {
 		return []types.JID{phoneJID, jid}
 	}
 	return []types.JID{jid}
+}
+
+// lookupPresence returns the first observed presence across the candidate
+// identities. A contact nobody subscribed to comes back as the zero
+// PresenceRow, which is not an error.
+func lookupPresence(ctx context.Context, store *cache.Store, identities []types.JID) (cache.PresenceRow, error) {
+	for _, id := range identities {
+		row, err := store.GetContactPresence(ctx, id.String())
+		if err != nil {
+			return cache.PresenceRow{}, err
+		}
+		if row.Observed {
+			return row, nil
+		}
+	}
+	return cache.PresenceRow{}, nil
 }
 
 // lookupContact returns the first cached contact row found across the

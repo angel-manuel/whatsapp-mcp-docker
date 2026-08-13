@@ -352,3 +352,40 @@ func unixSeconds(t time.Time) int64 {
 	}
 	return t.Unix()
 }
+
+// UpsertPresence records an observed presence update for jid, creating a
+// bare contact row when none exists yet (presence can arrive for a JID the
+// address book has never named). It is the persistence half of
+// subscribe_presence: the tool opens the subscription, the ingestor's
+// *events.Presence handler lands here.
+//
+// A zero lastSeen means "the contact hides their last-seen time"; it does not
+// clobber a previously observed value. presence_updated_at is always bumped,
+// so callers can tell a genuinely-offline contact from one never observed.
+func (s *Store) UpsertPresence(ctx context.Context, jid string, online bool, lastSeen time.Time) error {
+	if jid == "" {
+		return errors.New("cache: UpsertPresence: JID required")
+	}
+	var lastSeenTS int64
+	if !lastSeen.IsZero() {
+		lastSeenTS = lastSeen.Unix()
+	}
+	now := time.Now().Unix()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO contacts (jid, push_name, business_name, first_name, full_name, updated_at,
+                      presence_online, presence_last_seen_ts, presence_updated_at)
+VALUES (?, '', '', '', '', ?, ?, ?, ?)
+ON CONFLICT(jid) DO UPDATE SET
+    presence_online       = excluded.presence_online,
+    presence_last_seen_ts = CASE WHEN excluded.presence_last_seen_ts != 0
+                                THEN excluded.presence_last_seen_ts
+                                ELSE contacts.presence_last_seen_ts END,
+    presence_updated_at   = excluded.presence_updated_at
+`,
+		jid, now, boolToInt(online), lastSeenTS, now,
+	)
+	if err != nil {
+		return fmt.Errorf("cache: upsert presence %s: %w", jid, err)
+	}
+	return nil
+}

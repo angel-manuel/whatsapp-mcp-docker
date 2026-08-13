@@ -135,6 +135,8 @@ func (i *Ingestor) HandleEvent(evt any) {
 		i.handleArchive(ctx, v)
 	case *events.Star:
 		i.handleStar(ctx, v)
+	case *events.Presence:
+		i.handlePresence(ctx, v)
 	default:
 		recognized = false
 	}
@@ -748,6 +750,23 @@ func directPollCreation(msg *waE2E.Message) *waE2E.PollCreationMessage {
 		}
 	}
 	return nil
+}
+
+// handlePresence records an availability update for a contact. These events
+// only arrive for JIDs this device explicitly subscribed to (the
+// subscribe_presence tool) and only while this device is itself online, so
+// the presence columns stay at their defaults for every other contact.
+//
+// evt.LastSeen is zero when the contact hides their last-seen time; the store
+// keeps any previously observed value in that case rather than zeroing it.
+func (i *Ingestor) handlePresence(ctx context.Context, evt *events.Presence) {
+	if evt == nil || evt.From.User == "" {
+		return
+	}
+	jid := evt.From.ToNonAD().String()
+	if err := i.store.UpsertPresence(ctx, jid, !evt.Unavailable, evt.LastSeen); err != nil {
+		i.logger.Warn("cache: presence event", slog.String("jid", jid), slog.String("err", err.Error()))
+	}
 }
 
 // buildMessageRow pulls the shape of a Message row out of a waE2E.Message.

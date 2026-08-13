@@ -111,6 +111,48 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			Handler:     downloadMedia(deps),
 		},
 		{
+			Name:        "set_status_message",
+			Description: "MUTATES ACCOUNT STATE: overwrite the account's 'About' text (the one-line bio on the profile), visible to everyone the account's privacy settings allow. This is not a status broadcast/story. Max 139 characters; an empty string clears it. There is no undo — the previous text is not recoverable from here.",
+			InputSchema: setStatusMessageSchema,
+			Handler:     setStatusMessage(deps),
+		},
+		{
+			Name:        "send_presence",
+			Description: "MUTATES ACCOUNT STATE: publish the account's global availability ('available' = online, 'unavailable' = offline). Contacts allowed to see last-seen observe this immediately. Marking available is also a prerequisite for receiving the updates subscribe_presence asks for.",
+			InputSchema: sendPresenceSchema,
+			Handler:     sendPresence(deps),
+		},
+		{
+			Name:        "send_chat_presence",
+			Description: "MUTATES ACCOUNT STATE: show or clear the typing indicator in one chat — 'composing' with media 'text' renders as \"typing…\", with media 'audio' as \"recording audio…\"; 'paused' clears it. The other party sees it live. WhatsApp expires the indicator after a few seconds, so sustained typing needs re-sending.",
+			InputSchema: sendChatPresenceSchema,
+			Handler:     sendChatPresence(deps),
+		},
+		{
+			Name:        "subscribe_presence",
+			Description: "MUTATES ACCOUNT STATE: ask the server to push online/offline updates for one user. The subscription is server-side and visible to WhatsApp as activity from this account. Updates arrive asynchronously and are cached against the contact — read them back with get_contact_details. Requires this account to be marked available (send_presence) for the server to keep delivering them.",
+			InputSchema: subscribePresenceSchema,
+			Handler:     subscribePresence(deps),
+		},
+		{
+			Name:        "set_disappearing_timer",
+			Description: "MUTATES ACCOUNT STATE: change the disappearing-message timer for one chat ('off', '24h', '7d', '90d'). The change applies to every participant, is announced in the chat itself, and causes future messages to be deleted on all devices once the timer elapses.",
+			InputSchema: setDisappearingTimerSchema,
+			Handler:     setDisappearingTimer(deps),
+		},
+		{
+			Name:        "set_default_disappearing_timer",
+			Description: "MUTATES ACCOUNT STATE: change the account-wide default disappearing-message timer ('off', '24h', '7d', '90d') applied to newly started chats. Existing chats keep their own timer.",
+			InputSchema: setDefaultDisappearingTimerSchema,
+			Handler:     setDefaultDisappearingTimer(deps),
+		},
+		{
+			Name:        "mark_read",
+			Description: "MUTATES ACCOUNT STATE: send a read receipt for one or more messages, turning the sender's ticks blue and updating their last-read position. All ids must be from the same author; sender_jid is required in group chats. Also clears the chat's cached unread flag. Cannot be undone.",
+			InputSchema: markReadSchema,
+			Handler:     markRead(deps),
+		},
+		{
 			Name:        "cache_sync",
 			Description: "Trigger reconciliation of the local cache against authoritative whatsmeow endpoints (joined groups, subscribed newsletters, app state). Returns immediately with a sync_id; per-stage progress is reported by cache_sync_status.",
 			InputSchema: cacheSyncSchema,

@@ -81,6 +81,44 @@ type mockWA struct {
 	fetchAppStateErr      error
 	appStateCalls         int
 	appStateHook          func(name appstate.WAPatchName) // optional, fires per call
+
+	// Account-mutation surface (set_status_message, the presence tools, the
+	// disappearing timers, mark_read). Each call records what was forwarded
+	// so tests can assert the translation from tool arguments to whatsmeow
+	// types, and each has an err field for the failure paths.
+	statusMsg      string
+	statusMsgCalls int
+	statusMsgErr   error
+
+	presence      types.Presence
+	presenceCalls int
+	presenceErr   error
+
+	chatPresenceJID   types.JID
+	chatPresenceState types.ChatPresence
+	chatPresenceMedia types.ChatPresenceMedia
+	chatPresenceCalls int
+	chatPresenceErr   error
+
+	subscribedJID  types.JID
+	subscribeCalls int
+	subscribeErr   error
+
+	timerChat  types.JID
+	timer      time.Duration
+	timerCalls int
+	timerErr   error
+
+	defaultTimer      time.Duration
+	defaultTimerCalls int
+	defaultTimerErr   error
+
+	markReadIDs    []types.MessageID
+	markReadChat   types.JID
+	markReadSender types.JID
+	markReadTS     time.Time
+	markReadCalls  int
+	markReadErr    error
 }
 
 func (m *mockWA) GroupInfo(_ context.Context, jid types.JID) (*types.GroupInfo, error) {
@@ -213,6 +251,54 @@ func (m *mockWA) StoreMessageSecret(_ context.Context, chat, sender types.JID, i
 	}
 	m.secrets = append(m.secrets, storedSecret{chat: chat, sender: sender, id: id, secret: secret})
 	return nil
+}
+
+func (m *mockWA) SetStatusMessage(_ context.Context, msg string) error {
+	m.statusMsgCalls++
+	m.statusMsg = msg
+	return m.statusMsgErr
+}
+
+func (m *mockWA) SendPresence(_ context.Context, state types.Presence) error {
+	m.presenceCalls++
+	m.presence = state
+	return m.presenceErr
+}
+
+func (m *mockWA) SendChatPresence(_ context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error {
+	m.chatPresenceCalls++
+	m.chatPresenceJID = jid
+	m.chatPresenceState = state
+	m.chatPresenceMedia = media
+	return m.chatPresenceErr
+}
+
+func (m *mockWA) SubscribePresence(_ context.Context, jid types.JID) error {
+	m.subscribeCalls++
+	m.subscribedJID = jid
+	return m.subscribeErr
+}
+
+func (m *mockWA) SetDisappearingTimer(_ context.Context, chat types.JID, timer time.Duration) error {
+	m.timerCalls++
+	m.timerChat = chat
+	m.timer = timer
+	return m.timerErr
+}
+
+func (m *mockWA) SetDefaultDisappearingTimer(_ context.Context, timer time.Duration) error {
+	m.defaultTimerCalls++
+	m.defaultTimer = timer
+	return m.defaultTimerErr
+}
+
+func (m *mockWA) MarkRead(_ context.Context, ids []types.MessageID, ts time.Time, chat, sender types.JID) error {
+	m.markReadCalls++
+	m.markReadIDs = ids
+	m.markReadTS = ts
+	m.markReadChat = chat
+	m.markReadSender = sender
+	return m.markReadErr
 }
 
 // Whatsmeow returns nil: no test in this file downloads media, and
