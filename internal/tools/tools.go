@@ -10,6 +10,7 @@ package tools
 
 import (
 	"context"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
@@ -44,6 +45,19 @@ type WAClient interface {
 	BuildPollCreation(name string, options []string, selectableCount int) (*waE2E.Message, error)
 	BuildPollVote(ctx context.Context, pollInfo *types.MessageInfo, optionNames []string) (*waE2E.Message, error)
 	StoreMessageSecret(ctx context.Context, chat, sender types.JID, id types.MessageID, secret []byte) error
+
+	// Account-visible mutations — the surface behind set_status_message,
+	// send_presence, send_chat_presence, subscribe_presence,
+	// set_disappearing_timer, set_default_disappearing_timer and mark_read.
+	// Every one of these is observable by other WhatsApp users, so the
+	// handlers validate their inputs before getting here.
+	SetStatusMessage(ctx context.Context, msg string) error
+	SendPresence(ctx context.Context, state types.Presence) error
+	SendChatPresence(ctx context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error
+	SubscribePresence(ctx context.Context, jid types.JID) error
+	SetDisappearingTimer(ctx context.Context, chat types.JID, timer time.Duration) error
+	SetDefaultDisappearingTimer(ctx context.Context, timer time.Duration) error
+	MarkRead(ctx context.Context, ids []types.MessageID, timestamp time.Time, chat, sender types.JID) error
 
 	// Whatsmeow exposes the raw client for surfaces this interface does
 	// not wrap — today only media downloads, which need whatsmeow's

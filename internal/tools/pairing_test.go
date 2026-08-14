@@ -69,6 +69,20 @@ func (f *fakeWA) StoreMessageSecret(context.Context, types.JID, types.JID, types
 	return nil
 }
 
+// Account-mutation surface — the pairing tests never touch it, so every
+// method is an inert success that keeps the fake satisfying tools.WAClient.
+func (f *fakeWA) SetStatusMessage(context.Context, string) error     { return nil }
+func (f *fakeWA) SendPresence(context.Context, types.Presence) error { return nil }
+func (f *fakeWA) SubscribePresence(context.Context, types.JID) error { return nil }
+func (f *fakeWA) SendChatPresence(context.Context, types.JID, types.ChatPresence, types.ChatPresenceMedia) error {
+	return nil
+}
+func (f *fakeWA) SetDisappearingTimer(context.Context, types.JID, time.Duration) error { return nil }
+func (f *fakeWA) SetDefaultDisappearingTimer(context.Context, time.Duration) error     { return nil }
+func (f *fakeWA) MarkRead(context.Context, []types.MessageID, time.Time, types.JID, types.JID) error {
+	return nil
+}
+
 // Whatsmeow is never exercised by the pairing tests; download_media is the
 // only caller and it supplies its own MediaDownloader.
 func (f *fakeWA) Whatsmeow() *whatsmeow.Client { return nil }

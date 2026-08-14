@@ -362,3 +362,50 @@ func normalisePagination(limit, page, defaultLimit, hardMax int) (int, int) {
 	}
 	return limit, page
 }
+
+// PresenceRow is the read-side projection of the presence columns on a
+// contact row. Observed is false when no *events.Presence has ever been
+// ingested for the JID, in which case Online and LastSeen are meaningless.
+type PresenceRow struct {
+	Observed bool
+	Online   bool
+	// LastSeen is zero when the contact hides their last-seen time — that
+	// is independent of Observed, which only reports whether an event
+	// arrived at all.
+	LastSeen  time.Time
+	UpdatedAt time.Time
+}
+
+// GetContactPresence returns the presence last observed for jid. A JID with
+// no contact row, or one that predates any presence subscription, comes back
+// as the zero PresenceRow (Observed=false) rather than sql.ErrNoRows —
+// callers treat "never observed" and "unknown contact" identically.
+func (s *Store) GetContactPresence(ctx context.Context, jid string) (PresenceRow, error) {
+	if jid == "" {
+		return PresenceRow{}, errors.New("cache: GetContactPresence: jid required")
+	}
+	var online int
+	var lastSeenTS, updatedAt int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT presence_online, presence_last_seen_ts, presence_updated_at FROM contacts WHERE jid = ?`,
+		jid,
+	).Scan(&online, &lastSeenTS, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PresenceRow{}, nil
+	}
+	if err != nil {
+		return PresenceRow{}, fmt.Errorf("cache: get presence %s: %w", jid, err)
+	}
+	if updatedAt == 0 {
+		return PresenceRow{}, nil
+	}
+	out := PresenceRow{
+		Observed:  true,
+		Online:    online != 0,
+		UpdatedAt: time.Unix(updatedAt, 0).UTC(),
+	}
+	if lastSeenTS != 0 {
+		out.LastSeen = time.Unix(lastSeenTS, 0).UTC()
+	}
+	return out, nil
+}

@@ -921,3 +921,116 @@ func TestHandleEvent_HistorySync_BackfillsReactions(t *testing.T) {
 		t.Errorf("sender = %q, want %q", got[0].SenderJID, participant)
 	}
 }
+
+// Presence only reaches the ingestor for JIDs the subscribe_presence tool
+// asked for; these tests cover what happens once it does.
+
+func TestHandleEvent_Presence_RecordsOnline(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "1234567890@s.whatsapp.net")
+	ingest.HandleEvent(&events.Presence{From: jid})
+
+	got, err := store.GetContactPresence(context.Background(), jid.String())
+	if err != nil {
+		t.Fatalf("GetContactPresence: %v", err)
+	}
+	if !got.Observed || !got.Online {
+		t.Fatalf("got observed=%v online=%v, want both true", got.Observed, got.Online)
+	}
+	if got.UpdatedAt.IsZero() {
+		t.Error("UpdatedAt is zero, want the ingest timestamp")
+	}
+}
+
+func TestHandleEvent_Presence_RecordsOfflineWithLastSeen(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "1234567890@s.whatsapp.net")
+	lastSeen := time.Unix(1700000000, 0).UTC()
+	ingest.HandleEvent(&events.Presence{From: jid, Unavailable: true, LastSeen: lastSeen})
+
+	got, err := store.GetContactPresence(context.Background(), jid.String())
+	if err != nil {
+		t.Fatalf("GetContactPresence: %v", err)
+	}
+	if !got.Observed || got.Online {
+		t.Fatalf("got observed=%v online=%v, want observed with online=false", got.Observed, got.Online)
+	}
+	if !got.LastSeen.Equal(lastSeen) {
+		t.Errorf("LastSeen=%v, want %v", got.LastSeen, lastSeen)
+	}
+}
+
+// A contact who hides their last-seen time sends presence with a zero
+// LastSeen. That must not erase a timestamp observed earlier.
+func TestHandleEvent_Presence_ZeroLastSeenKeepsPreviousValue(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	jid := mustParseJID(t, "1234567890@s.whatsapp.net")
+	lastSeen := time.Unix(1700000000, 0).UTC()
+	ingest.HandleEvent(&events.Presence{From: jid, Unavailable: true, LastSeen: lastSeen})
+	ingest.HandleEvent(&events.Presence{From: jid})
+
+	got, err := store.GetContactPresence(context.Background(), jid.String())
+	if err != nil {
+		t.Fatalf("GetContactPresence: %v", err)
+	}
+	if !got.Online {
+		t.Error("Online=false, want the newer available event to win")
+	}
+	if !got.LastSeen.Equal(lastSeen) {
+		t.Errorf("LastSeen=%v, want the earlier %v preserved", got.LastSeen, lastSeen)
+	}
+}
+
+// Presence arrives for the device-suffixed JID; the row is keyed on the
+// non-AD form so get_contact_details finds it.
+func TestHandleEvent_Presence_StripsDeviceSuffix(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	ingest.HandleEvent(&events.Presence{From: mustParseJID(t, "1234567890.0:12@s.whatsapp.net")})
+
+	got, err := store.GetContactPresence(context.Background(), "1234567890@s.whatsapp.net")
+	if err != nil {
+		t.Fatalf("GetContactPresence: %v", err)
+	}
+	if !got.Observed {
+		t.Fatal("Observed=false, want the presence keyed on the non-AD JID")
+	}
+}
+
+// Presence must not clobber the identity fields on an existing contact row.
+func TestHandleEvent_Presence_PreservesContactFields(t *testing.T) {
+	ingest, store := newTestIngestor(t)
+	ctx := context.Background()
+	jid := mustParseJID(t, "1234567890@s.whatsapp.net")
+	if err := store.UpsertContact(ctx, Contact{JID: jid.String(), PushName: "Alice", FullName: "Alice Anderson"}); err != nil {
+		t.Fatalf("UpsertContact: %v", err)
+	}
+
+	ingest.HandleEvent(&events.Presence{From: jid})
+
+	row, err := store.GetContactByJID(ctx, jid.String())
+	if err != nil {
+		t.Fatalf("GetContactByJID: %v", err)
+	}
+	if row.PushName != "Alice" || row.FullName != "Alice Anderson" {
+		t.Errorf("contact fields clobbered: %+v", row)
+	}
+}
+
+// A contact nobody ever subscribed to reports Observed=false rather than an
+// error, and so does a JID with no row at all.
+func TestGetContactPresence_UnobservedIsZeroValue(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.UpsertContact(ctx, Contact{JID: "1234567890@s.whatsapp.net", PushName: "Alice"}); err != nil {
+		t.Fatalf("UpsertContact: %v", err)
+	}
+	for _, jid := range []string{"1234567890@s.whatsapp.net", "999@s.whatsapp.net"} {
+		got, err := store.GetContactPresence(ctx, jid)
+		if err != nil {
+			t.Fatalf("GetContactPresence(%s): %v", jid, err)
+		}
+		if got.Observed {
+			t.Errorf("%s: Observed=true, want false", jid)
+		}
+	}
+}
