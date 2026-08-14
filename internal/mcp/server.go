@@ -50,8 +50,8 @@ type Config struct {
 	// second auth system and no second port.
 	//
 	// This exists for the one thing MCP structurally cannot do: transfer
-	// bytes. GET /media/{sha256} is the only current user. Anything that
-	// can be a tool stays a tool.
+	// bytes — today GET /media/{sha256} outbound and POST /media inbound.
+	// Anything that can be a tool stays a tool.
 	Routes map[string]http.Handler
 }
 

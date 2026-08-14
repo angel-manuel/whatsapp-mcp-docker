@@ -10,6 +10,7 @@ package tools
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -17,6 +18,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/audio"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/media"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
@@ -94,6 +96,34 @@ type MediaDownloader interface {
 	DownloadMediaWithPath(ctx context.Context, directPath string, encFileHash, fileHash, mediaKey []byte, fileLength int, mediaType whatsmeow.MediaType, mmsType string) ([]byte, error)
 }
 
+// MediaUploader is the narrow whatsmeow upload surface used by the media
+// send tools, and the mirror of MediaDownloader. *whatsmeow.Client
+// satisfies it directly; tests supply a fake through Deps.Uploader so they
+// never need a live media connection.
+//
+// Both methods exist because the two send paths want different things:
+// send_file streams a stored blob straight off disk, while the audio path
+// already holds transcoded bytes in memory.
+type MediaUploader interface {
+	// Upload encrypts and uploads an in-memory payload.
+	Upload(ctx context.Context, plaintext []byte, appInfo whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
+	// UploadReader streams plaintext, using tempFile (or its own temp file
+	// when nil) for the encrypted copy.
+	UploadReader(ctx context.Context, plaintext io.Reader, tempFile io.ReadWriteSeeker, appInfo whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
+}
+
+// AudioTranscoder converts arbitrary audio to the Ogg/Opus WhatsApp plays.
+// Satisfied by *audio.Transcoder; the interface exists so tests can drive
+// both sides of the FFMPEG_PATH contract without an ffmpeg binary.
+type AudioTranscoder interface {
+	// Available reports whether a usable ffmpeg binary is present.
+	Available() bool
+	// Path is the binary that was probed, for error messages.
+	Path() string
+	// ToOpus transcodes in to a mono 48 kHz Ogg/Opus stream.
+	ToOpus(ctx context.Context, in io.Reader) ([]byte, error)
+}
+
 // Deps is the wiring carried into each tool handler. Fields are optional
 // at the struct level but individual tools document which they require.
 type Deps struct {
@@ -101,7 +131,14 @@ type Deps struct {
 	WA       WAClient
 	Ingestor *cache.Ingestor         // optional; cache_sync_status reads its heartbeat
 	Sync     *cache.SyncOrchestrator // optional; required by cache_sync, surfaced by cache_sync_status
-	Media    *media.Store            // optional; required by download_media
+	Media    *media.Store            // optional; required by download_media and the media send tools
+	// Audio transcodes non-Opus audio for send_audio_message. Nil, or a
+	// transcoder whose Available() is false, means the server refuses
+	// non-Opus audio instead of sending something WhatsApp cannot play.
+	Audio AudioTranscoder
+	// Uploader overrides the media-upload surface. Nil means "use
+	// WA.Whatsmeow()", resolved per call for the same reason Downloader is.
+	Uploader MediaUploader
 	// Downloader overrides the media-download surface. Nil means "use
 	// WA.Whatsmeow()", which is what production wants — the raw client is
 	// re-created across pair/unpair, so it must be resolved per call
@@ -126,3 +163,23 @@ func (d Deps) downloader() MediaDownloader {
 	}
 	return nil
 }
+
+// uploader resolves the media-upload surface for a single call, with the
+// same nil-handling as downloader: nil means whatsmeow has no client yet,
+// which callers surface as not_paired.
+func (d Deps) uploader() MediaUploader {
+	if d.Uploader != nil {
+		return d.Uploader
+	}
+	if d.WA == nil {
+		return nil
+	}
+	if wm := d.WA.Whatsmeow(); wm != nil {
+		return wm
+	}
+	return nil
+}
+
+// Compile-time proof that the production transcoder satisfies the
+// interface the tools depend on.
+var _ AudioTranscoder = (*audio.Transcoder)(nil)

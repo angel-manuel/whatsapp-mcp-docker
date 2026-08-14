@@ -5,9 +5,10 @@ server for AI agents (Claude Code, Cursor, any MCP HTTP client). Pull the
 image, run it, and your agent pairs the phone and controls WhatsApp — all
 through MCP.
 
-Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 32
+Built on [`whatsmeow`](https://github.com/tulir/whatsmeow). Ships 34
 MCP tools today (cache-backed chat / message reads, contact and group
-lookup, `send_message`, `send_reaction`, polls, `download_media`,
+lookup, `send_message`, `send_file`, `send_audio_message`,
+`send_reaction`, polls, `download_media`,
 account status / presence / disappearing-timer / read-receipt controls,
 `ping`, `cache_sync` / `cache_sync_status`, plus native `pairing_start` /
 `pairing_complete`); coverage and gaps are tracked
@@ -24,7 +25,7 @@ Source, full docs, and changelog:
 | Tag | Base | Use when |
 |---|---|---|
 | `latest` | distroless/static, non-root, no shell | **Default.** Smallest, hardest to misuse. |
-| `latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You want a shell for triage. `ffmpeg` is shipped ahead of the audio-send path (transcoding arbitrary input to Opus); no tool invokes it today. |
+| `latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You want a shell for triage, or you want `send_audio_message` to accept audio that is not already Ogg/Opus — `ffmpeg` transcodes it. On the distroless image non-Opus audio is refused rather than sent unplayable. |
 | `X.Y.Z`, `X.Y.Z-slim` | (as above) | Immutable per-release pins (no `v` prefix — Docker tag convention). **Pin by digest in production.** |
 
 Both variants are multi-arch: `linux/amd64`, `linux/arm64`.
@@ -80,7 +81,7 @@ export the variable in the shell that launches Claude Code.
 | Var | Default | Notes |
 |---|---|---|
 | `TRANSPORT` | `http` | `http` or `stdio`. HTTP **requires** `AUTH_TOKEN`. |
-| `PORT` | `8081` | Serves `/mcp` **and** `/media/<sha256>`. |
+| `PORT` | `8081` | Serves `/mcp` **and** the media byte routes (`POST /media`, `GET /media/<sha256>`). |
 | `DATA_DIR` | `/data` | Persistent state directory (`session.db`, `cache.db`, `media/`). |
 | `AUTH_TOKEN` | *(unset)* | Bearer token required on every HTTP request (`/mcp` and `/media/`). |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them is a fatal startup error — there is no TLS listener. Terminate TLS in a reverse proxy. |
@@ -90,6 +91,8 @@ export the variable in the shell that launches Claude Code.
 | `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`; least-recently-requested evicted first. `0` = unlimited. |
 | `MEDIA_TTL` | *(unset)* | Go duration (e.g. `168h`); evicts older media. Unset = disabled. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period; also runs at startup. |
+| `MEDIA_MAX_UPLOAD_BYTES` | `104857600` | Largest single `POST /media` body; over it the request is refused with `413`. |
+| `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Where `send_audio_message` looks for ffmpeg to transcode non-Opus audio. Present in `-slim`, absent in the distroless image (where non-Opus audio is refused). |
 
 In production, deliver `AUTH_TOKEN` as a tmpfs-mounted file referenced by
 path, not via `-e` — `-e` exposes the secret to anyone who can read
@@ -100,12 +103,13 @@ client-certificate auth must front it with a reverse proxy.
 
 ## Tools
 
-32 MCP tools today: cache-backed chat / message reads
+34 MCP tools today: cache-backed chat / message reads
 (`list_chats`, `list_conversations`, `get_chat`, `list_messages`,
 `get_message_context`, `get_last_interaction`, `get_contact_chats`,
 `get_direct_chat_by_contact`, `get_conversation`), contacts (`search_contacts`,
 `list_all_contacts`, `get_contact_details`, `resolve_jid`), `get_group_info`,
-`send_message` (text), `send_reaction`,
+`send_message` (text), `send_file` (image / video / audio / document /
+sticker), `send_audio_message` (voice note), `send_reaction`,
 polls (`send_poll`, `vote_poll`, `get_poll_results`),
 `download_media`, account and presence controls
 (`set_status_message`, `send_presence`, `send_chat_presence`,
@@ -123,17 +127,22 @@ see — the profile `About` text, online and per-chat typing presence,
 disappearing-message timers and read receipts. Each says so in its tool
 description so an agent surfaces it before acting.
 
-`download_media` returns a JSON descriptor, not bytes; fetch the file from
-`GET /media/<sha256>` on the same port with the same bearer token.
+Bytes never travel through MCP. `download_media` returns a JSON descriptor;
+fetch the file from `GET /media/<sha256>` on the same port with the same
+bearer token. Sending is the mirror image: `POST /media` with the file as
+the body returns a `media_path`, and `send_file` / `send_audio_message`
+take that reference.
 
 ## Operational notes
 
 - **Non-root** (UID 1000). No `NET_ADMIN` / `SYS_ADMIN` needed.
 - **Read-only root filesystem compatible** — mount `/` as `ro`,
   `/data` (and `/tmp`) as `rw`.
-- **Media is a bounded cache** — `$DATA_DIR/media` holds attachments fetched
-  by `download_media`, capped by `MEDIA_MAX_BYTES` / `MEDIA_TTL`. Evicted
-  blobs are simply re-downloaded on the next call.
+- **Media is a bounded store** — `$DATA_DIR/media` holds attachments fetched
+  by `download_media` *and* bytes staged via `POST /media`, capped by
+  `MEDIA_MAX_BYTES` / `MEDIA_TTL`. An evicted download is re-fetched on the
+  next call; an evicted upload has no origin to re-fetch from, so upload
+  shortly before sending.
 - **One process per `/data`.** Ratchet state rotates on every message;
   startup acquires an exclusive `flock` on `/data/.lock` and exits
   non-zero if another process owns it.

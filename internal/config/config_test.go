@@ -14,6 +14,7 @@ var allVars = []string{
 	"MTLS_CA_FILE", "MTLS_CERT_FILE", "MTLS_KEY_FILE",
 	"WHATSAPP_DEVICE_NAME", "FFMPEG_PATH", "ENABLE_PPROF",
 	"MEDIA_MAX_BYTES", "MEDIA_TTL", "MEDIA_SWEEP_INTERVAL",
+	"MEDIA_MAX_UPLOAD_BYTES",
 }
 
 func clearEnv(t *testing.T) {
@@ -284,6 +285,9 @@ func TestLoad_MediaRetentionDefaults(t *testing.T) {
 	if cfg.MediaTTL != 0 {
 		t.Errorf("MediaTTL = %s, want 0 (disabled)", cfg.MediaTTL)
 	}
+	if cfg.MediaMaxUploadBytes != DefaultMediaMaxUploadBytes {
+		t.Errorf("MediaMaxUploadBytes = %d, want %d", cfg.MediaMaxUploadBytes, DefaultMediaMaxUploadBytes)
+	}
 	if cfg.MediaSweepInterval != time.Hour {
 		t.Errorf("MediaSweepInterval = %s, want 1h", cfg.MediaSweepInterval)
 	}
@@ -299,6 +303,7 @@ func TestLoad_MediaRetentionOverrides(t *testing.T) {
 	t.Setenv("MEDIA_MAX_BYTES", "5368709120")
 	t.Setenv("MEDIA_TTL", "168h")
 	t.Setenv("MEDIA_SWEEP_INTERVAL", "15m")
+	t.Setenv("MEDIA_MAX_UPLOAD_BYTES", "26214400")
 
 	cfg, err := Load()
 	if err != nil {
@@ -312,6 +317,9 @@ func TestLoad_MediaRetentionOverrides(t *testing.T) {
 	}
 	if cfg.MediaSweepInterval != 15*time.Minute {
 		t.Errorf("MediaSweepInterval = %s", cfg.MediaSweepInterval)
+	}
+	if cfg.MediaMaxUploadBytes != 26214400 {
+		t.Errorf("MediaMaxUploadBytes = %d", cfg.MediaMaxUploadBytes)
 	}
 	if got := cfg.MediaDir(); got != "/srv/wa/media" {
 		t.Errorf("MediaDir() = %q", got)
@@ -328,6 +336,8 @@ func TestLoad_MediaRetentionRejectsBadValues(t *testing.T) {
 		{"unparseable ttl", map[string]string{"MEDIA_TTL": "7 days"}},
 		{"negative ttl", map[string]string{"MEDIA_TTL": "-1h"}},
 		{"negative interval", map[string]string{"MEDIA_SWEEP_INTERVAL": "-5m"}},
+		{"unparseable upload cap", map[string]string{"MEDIA_MAX_UPLOAD_BYTES": "100MiB"}},
+		{"negative upload cap", map[string]string{"MEDIA_MAX_UPLOAD_BYTES": "-1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

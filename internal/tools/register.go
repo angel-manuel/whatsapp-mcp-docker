@@ -62,6 +62,23 @@ func Register(reg *mcp.Registry, deps Deps) error {
 			Handler:     sendMessage(deps),
 		},
 		{
+			Name: "send_file",
+			Description: "Send stored bytes as a WhatsApp media message (image, video, audio, document or sticker). " +
+				"Bytes are never passed through MCP: upload them first with 'POST /media' (same port and bearer token as /mcp), " +
+				"or reuse the media_path a download_media call returned, and pass that reference as media_path. " +
+				"The envelope is picked from the stored mimetype unless media_type says otherwise.",
+			InputSchema: sendFileSchema,
+			Handler:     sendFile(deps),
+		},
+		{
+			Name: "send_audio_message",
+			Description: "Send stored audio as a WhatsApp voice note (PTT). Takes the same '/media/<sha256>' reference as send_file. " +
+				"Voice notes must be Ogg/Opus: other formats are transcoded when ffmpeg is available (FFMPEG_PATH; shipped in the -slim image) " +
+				"and refused with invalid_argument when it is not, rather than sent as an unplayable note. Use send_file for a plain audio attachment.",
+			InputSchema: sendAudioMessageSchema,
+			Handler:     sendAudioMessage(deps),
+		},
+		{
 			Name:        "send_poll",
 			Description: "Create a WhatsApp poll in a user or group chat. Returns the poll's message_id, which is the handle vote_poll and get_poll_results take.",
 			InputSchema: sendPollSchema,

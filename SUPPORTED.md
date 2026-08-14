@@ -39,6 +39,8 @@ These read from the local SQLite cache; whatsmeow itself isn't called.
 | Any recipient → readable identity            | `resolve_jid`         | cache only (`GetGroupInfo` only for an unnamed group)         |
 | Authoritative group metadata                 | `get_group_info`      | `GetGroupInfo`                                                |
 | Send text message                            | `send_message`        | `SendMessage` (text only)                                     |
+| Send an image / video / audio / document / sticker | `send_file`     | `UploadReader` (`Upload` when audio is transcoded) + `SendMessage` (`ImageMessage`, `VideoMessage`, `AudioMessage`, `DocumentMessage`, `StickerMessage`) |
+| Send a voice note (PTT)                      | `send_audio_message`  | `UploadReader` / `Upload` + `SendMessage` (`AudioMessage` with `PTT`); ffmpeg transcode to Opus when `FFMPEG_PATH` resolves |
 | React to a message with an emoji             | `send_reaction`       | `BuildReaction` + `SendMessage`                               |
 | Create a poll                                | `send_poll`           | `BuildPollCreation` + `SendMessage` (+ `PutMessageSecret`, so votes on our own poll stay readable) |
 | Vote on / withdraw from a poll               | `vote_poll`           | `BuildPollVote` + `SendMessage`                               |
@@ -122,14 +124,15 @@ as a contact who is offline.
 ### HTTP routes (not MCP)
 
 Mounted on the same listener and behind the same bearer auth as `/mcp`. This
-is not a general-purpose API: the only non-MCP route is the one thing MCP
-structurally cannot do, which is transfer bytes. The former `internal/admin`
+is not a general-purpose API: the only non-MCP routes are the one thing MCP
+structurally cannot do, which is transfer bytes — out and in. The former `internal/admin`
 package and its `:8082` surface were removed in `99b0ce7`; pairing and health
 are MCP tools (`pairing_start`, `pairing_complete`, `ping`).
 
 | Endpoint               | Backed by                                        |
 | ---------------------- | ------------------------------------------------ |
 | `GET /media/{sha256}`  | `media.Store` — serves blobs stored by `download_media`; `Range`, `ETag`, `Content-Disposition` |
+| `POST /media` (also `PUT`) | `media.Store` — stores the request body content-addressed and answers `201` with the same descriptor shape; the `media_path` it returns is what `send_file` / `send_audio_message` take. `Content-Type` sets the mimetype (sniffed from the bytes when absent *or* `application/octet-stream`), `?filename=` names the file. `400` for an empty body, `413` over `MEDIA_MAX_UPLOAD_BYTES` (default 100 MiB) |
 
 ---
 
@@ -147,7 +150,6 @@ is genuinely uncalled.
 
 | whatsmeow                                           | Notes                                                              |
 | --------------------------------------------------- | ------------------------------------------------------------------ |
-| ⭐ `SendMessage` for media envelopes                | image/video/audio/document/sticker. Today only text is supported. |
 | ⭐ `RevokeMessage` (`BuildRevoke` + send)           | delete-for-everyone.                                               |
 | ⭐ `BuildEdit` + `SendMessage`                      | edit a previously sent message.                                    |
 
@@ -198,11 +200,10 @@ is genuinely uncalled.
 
 | whatsmeow                                                                  | Notes                                                          |
 | -------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `DownloadThumbnail`                                                        | link-preview thumbnails; `JPEGThumbnail` is not captured at ingest today. |
+| `DownloadThumbnail`                                                        | link-preview thumbnails; `JPEGThumbnail` is not captured at ingest today, and outbound envelopes from `send_file` do not carry one either (recipients render a placeholder until the bytes arrive). |
 | `DownloadHistorySync`                                                      | large blob retrieval.                                          |
 | `DownloadToFile` / `DownloadMediaWithPathToFile`                           | streaming-to-disk variants. `download_media` buffers in memory and writes content-addressed. |
 | `DownloadFB` / `DownloadFBToFile`                                          | Facebook CDN variant.                                          |
-| `Upload` / `UploadReader`                                                  | required by any media-send tool.                               |
 | `DeleteMedia`                                                              | server-side delete.                                            |
 
 ### Identity & contacts (partial today)

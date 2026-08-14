@@ -32,8 +32,12 @@ Design-wise the container is also intended to be safely embeddable behind an ext
 `list_messages`, `list_chats`, `get_chat`, `get_direct_chat_by_contact`, `get_contact_chats`, `get_last_interaction`, `get_message_context`, `request_history`
 
 **Sending (4)**
-✅ `send_message` (text only — media envelopes not implemented). Planned, not
-yet implemented: `send_file`, `send_audio_message`, `send_reaction`.
+✅ `send_message` (text), ✅ `send_file` (image / video / audio / document /
+sticker envelopes), ✅ `send_audio_message` (voice note / PTT). Planned, not
+yet implemented: `send_reaction`.
+
+Both media tools take a `media_path` reference rather than bytes or a local
+filesystem path — see "Media byte routes" below.
 
 **Message editing / state (3)**
 `edit_message`, `delete_message`, `mark_read`
@@ -69,7 +73,7 @@ Polls also gain two native read/write tools with no upstream equivalent — `vot
 
 In addition to the parity surface, the Go build exposes 2 native pairing tools — `pairing_start`, `pairing_complete` — for agents that drive pairing through the MCP transport. They are the only pairing path (the admin HTTP SSE endpoints were removed in `99b0ce7`); concurrent flows are serialised at the wa layer (`adminMu` + `ErrPairInProgress`). These tools, plus `ping`, are exempt from the `not_paired` gate so that a pre-pair agent can bootstrap itself.
 
-`download_media` diverges from the upstream reference in one deliberate way: it returns a *descriptor*, never the bytes and never base64. See §Media transfer.
+`download_media`, `send_file` and `send_audio_message` diverge from the upstream reference in one deliberate way: bytes never pass through the tool call, in either direction. `download_media` returns a *descriptor*; the send tools take one. See §Media transfer.
 
 ## Architecture
 
@@ -84,15 +88,17 @@ In addition to the parity surface, the Go build exposes 2 native pairing tools �
 |       v                                                          |
 |   MCP server (stdio or HTTP/SSE on :PORT)                       |
 |       |                                                          |
-|       +---- GET /media/{sha256} on the SAME :PORT, same bearer   |
+|       +---- POST /media  +  GET /media/{sha256}                  |
+|             on the SAME :PORT, same bearer                       |
 |             (bytes only; MCP cannot carry them)                  |
 |                                                                  |
 |   SQLite + blobs:                                                |
 |     /data/session.db  (whatsmeow sqlstore: device, ratchet, ...) |
 |     /data/cache.db  (chats, messages, contacts, nicknames, polls)|
-|     /data/media/      (downloaded attachments, content-addressed)|
+|     /data/media/    (attachment blobs in + out, content-addressed)|
 |                                                                  |
 |   ffmpeg  (shelled out, optional, for audio transcode to Opus)  |
+|            used by send_audio_message; -slim image only          |
 |                                                                  |
 +------------------------------------------------------------------+
 ```
@@ -104,7 +110,7 @@ In addition to the parity surface, the Go build exposes 2 native pairing tools �
 ## Transports
 
 1. **HTTP/SSE MCP** on `BIND_ADDR:PORT` (primary). Suitable for out-of-container MCP clients and for proxying behind another service. Authentication is mandatory when HTTP is enabled (see Security).
-2. **stdio MCP** (local-dev mode). When `TRANSPORT=stdio`, the binary speaks MCP on stdin/stdout. Intended for Claude Desktop / `mcp` CLI / test harnesses. The media byte route is HTTP-only and therefore unavailable in stdio mode; `download_media` still stores the file under `$DATA_DIR/media`.
+2. **stdio MCP** (local-dev mode). When `TRANSPORT=stdio`, the binary speaks MCP on stdin/stdout. Intended for Claude Desktop / `mcp` CLI / test harnesses. The media byte routes are HTTP-only and therefore unavailable in stdio mode: `download_media` still stores the file under `$DATA_DIR/media`, but with no way to POST bytes in, the media send tools can only forward media the container already holds.
 
 ## Media transfer
 
@@ -112,12 +118,24 @@ MCP has no useful way to carry binary payloads, and putting attachment bytes int
 
 - **`download_media`** (MCP tool) — input `{ chat_jid, message_id }`. Fetches the attachment from WhatsApp's CDN, stores it content-addressed at `$DATA_DIR/media/<sha256>.<ext>`, and returns `{ media_path, mime, size, filename, sha256 }`. The call is idempotent: a digest already stored is a cache hit with no network I/O. Errors: `not_found` (message not cached), `no_media` (message carries no attachment), `media_unavailable` (locator expired or CDN failure), `internal`.
 - **`GET /media/{sha256}`** (HTTP) — mounted on the same listener as `/mcp`, behind the same bearer auth. Sends `Content-Type`, `Content-Length`, `Content-Disposition`, `ETag`, `Last-Modified` and `Cache-Control`; supports `Range` (`206`). `401` without a valid bearer, `404` for an unknown or evicted digest. The path segment MUST be validated as a 64-character hex digest before any filesystem access.
+- **`POST /media`** (HTTP) — the inbound mirror, same listener, same bearer auth. The request body is the raw file; `Content-Type` names the mimetype (sniffed from the leading bytes when absent or `application/octet-stream`) and `?filename=` names the file. Answers `201` with the same `{ media_path, mime, size, filename, sha256 }` descriptor, `400` for an empty body, `413` above `MEDIA_MAX_UPLOAD_BYTES` (default 100 MiB), `405` for a non-POST/PUT method. A caller's mistake MUST NOT be reported as `500`. Storage is content-addressed and idempotent, so re-uploading identical bytes is a cache hit. The payload MUST be spooled to disk rather than buffered whole in memory.
+- **`send_file` / `send_audio_message`** (MCP tools) — take `media_path` (a `/media/<sha256>` reference, a bare digest, or a gateway URL ending in one), never bytes, never base64, and never a local filesystem path. A message this server sends is mirrored into the cache with the plaintext digest of what went on the wire, so `download_media` resolves our own sends out of the store.
 
-This is the only non-MCP route the container serves, and it exists solely because MCP structurally cannot transfer bytes. It does not reopen the `:8082` admin API removed in `99b0ce7`.
+These are the only non-MCP routes the container serves, and they exist solely because MCP structurally cannot transfer bytes. They do not reopen the `:8082` admin API removed in `99b0ce7`.
+
+### Outbound audio
+
+Voice notes (`send_audio_message`, PTT) are Ogg/Opus or they are nothing: WhatsApp will accept another codec on the wire and then fail to play it, which is indistinguishable from a silent send failure. The contract is therefore two-sided and MUST fail closed:
+
+- Input already Ogg/Opus (decided by the magic number, not the declared mimetype) → uploaded as-is.
+- Otherwise, `FFMPEG_PATH` resolves to an executable → transcoded to mono 48 kHz Opus, and the converted blob is stored so the cached row and `download_media` agree with what the recipient received.
+- Otherwise → `invalid_argument` naming the probed path and the `-slim` image, rather than an unplayable send.
+
+`send_file` applies the same rule with a wider allow-list (`audio/ogg`, `audio/opus`, `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/amr` play as attachments), and sends without `PTT`.
 
 `media_direct_path` (migration `004`) is what makes downloads durable: the pre-signed `media_url` expires, the direct path does not. It is only present on the live protobuf at ingest time and CANNOT be backfilled, so messages ingested before that migration may only be downloadable until their URL expires. `download_media` MUST say so explicitly and point at `cache_sync` rather than returning an opaque failure.
 
-Retention: `$DATA_DIR/media` is a cache, not a system of record. It is bounded by `MEDIA_MAX_BYTES` (least-recently-requested evicted first) and optionally `MEDIA_TTL`, swept at startup and every `MEDIA_SWEEP_INTERVAL`. An evicted blob costs a re-download, not data.
+Retention: `$DATA_DIR/media` is a cache, not a system of record. It is bounded by `MEDIA_MAX_BYTES` (least-recently-requested evicted first) and optionally `MEDIA_TTL`, swept at startup and every `MEDIA_SWEEP_INTERVAL`. An evicted *download* costs a re-download, not data. An evicted *upload* has no origin to re-fetch from, so the send tools MUST report a missing digest as `not_found` with instructions to upload again, and callers should upload shortly before sending rather than staging bytes for long periods.
 
 ## Pairing
 
@@ -162,18 +180,19 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 |---|---|---|
 | `TRANSPORT` | `http` | `http` or `stdio` |
 | `BIND_ADDR` | `0.0.0.0` | HTTP bind address |
-| `PORT` | `8081` | Serves both `/mcp` and `/media/{sha256}` |
+| `PORT` | `8081` | Serves `/mcp`, `POST /media` and `GET /media/{sha256}` |
 | `DATA_DIR` | `/data` | Persistent state dir (`session.db`, `cache.db`, `media/`) |
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
 | `AUTH_TOKEN` | *(unset)* | Required bearer token for every HTTP route (`/mcp` and `/media/`). REQUIRED in `http` mode. |
 | `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them in `http` mode is a fatal startup error. No TLS listener exists, so they never encrypted anything or verified a client certificate. If mTLS is ever built, it will be additive to `AUTH_TOKEN`, never a replacement. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Shown on the user's phone after pairing. |
-| `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Reserved for the not-yet-implemented audio-send path. Parsed into config today but read by nothing; once audio sending lands, absent → audio conversion disabled, Opus input required. |
+| `FFMPEG_PATH` | `/usr/bin/ffmpeg` | ffmpeg binary used to transcode audio to Opus for `send_audio_message` (and for `send_file` audio WhatsApp cannot play). Probed per call, not at startup, so an ffmpeg bind-mounted into a running container is picked up without a restart. Present → arbitrary input is transcoded; absent → Opus input is required and anything else is refused with `invalid_argument`, never sent unplayable. |
 | `ENABLE_PPROF` | `false` | Exposes `/debug/pprof` when true. |
 | `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`. Over the cap, least-recently-requested blobs are evicted. `0` = unlimited. |
 | `MEDIA_TTL` | *(unset)* | Go duration; evicts media older than this. Unset/`0` disables age-based eviction. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period. A sweep also runs at startup. |
+| `MEDIA_MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Largest single `POST /media` body. A hard refusal (`413`), not an eviction trigger: it bounds what one request can push onto the volume between sweeps. |
 
 No long-lived secrets in env vars in production: operators should deliver `AUTH_TOKEN` via a secret store mount (tmpfs file + `file://` reference) rather than `-e`.
 
@@ -204,7 +223,7 @@ No long-lived secrets in env vars in production: operators should deliver `AUTH_
 
 ## Build & release
 
-- `Dockerfile` — multi-stage: Go builder → distroless-static (preferred) runtime. Optional `Dockerfile.slim` variant with shell + ffmpeg for audio transcoding use cases.
+- `Dockerfile` — multi-stage: Go builder → distroless-static (preferred) runtime. Optional `Dockerfile.slim` variant with shell + ffmpeg for audio transcoding use cases (`send_audio_message` with non-Opus input).
 - `Makefile` or `justfile` targets: `build`, `test`, `lint`, `image`, `run-local`.
 - CI (GitHub Actions): unit tests, `go vet`, `staticcheck`, image build + push on tag, cosign sign.
 - Versioning: SemVer; `v0.x` until tool surface is stable. Each release publishes both a `:vX.Y.Z` tag and an immutable digest.

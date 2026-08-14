@@ -10,11 +10,12 @@ MCP transport, pairing, session persistence — runs in **one Go process**
 inside **one Docker image**. No sidecars, no compose bundle, no second
 language runtime.
 
-Today the server ships **32 MCP tools**: cache-backed read tools for
-chats and messages, plus `send_message`, `send_reaction`, polls
-(`send_poll` / `vote_poll` / `get_poll_results`), `download_media`,
-contact / group lookups, `resolve_jid` (any recipient → readable identity),
-`cache_sync` / `cache_sync_status`, the `ping` health
+Today the server ships **34 MCP tools**: cache-backed read tools for
+chats and messages, plus `send_message`, `send_file` (image, video,
+audio, document, sticker), `send_audio_message` (voice notes),
+`send_reaction`, polls (`send_poll` / `vote_poll` / `get_poll_results`),
+`download_media`, contact / group lookups, `resolve_jid` (any recipient →
+readable identity), `cache_sync` / `cache_sync_status`, the `ping` health
 check, and the native `pairing_start` / `pairing_complete` tools that let
 an agent drive the link flow over MCP itself. A further set of tools
 mutates account-visible state — the `About` text, online and per-chat
@@ -93,7 +94,7 @@ Published to Docker Hub on every release tag:
 | Tag | Base | Use when |
 |---|---|---|
 | `angelmanuel/whatsapp-mcp:latest` | distroless/static, non-root, no shell | **Default.** Smallest, hardest to misuse. |
-| `angelmanuel/whatsapp-mcp:latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You want a shell for triage. `ffmpeg` is shipped ahead of the audio-send path (transcoding arbitrary input to Opus); no tool invokes it today. |
+| `angelmanuel/whatsapp-mcp:latest-slim` | `debian:bookworm-slim` + `ffmpeg` + `tini` | You want a shell for triage, or you want `send_audio_message` to accept audio that is not already Ogg/Opus. `ffmpeg` transcodes it; without this variant, non-Opus audio is refused rather than sent unplayable. |
 
 Both are multi-arch (`linux/amd64`, `linux/arm64`). Each release also
 publishes immutable `:X.Y.Z` and `:X.Y.Z-slim` tags (no `v` prefix —
@@ -107,15 +108,17 @@ Most operators only touch these:
 | Var | Default | Notes |
 |---|---|---|
 | `TRANSPORT` | `http` | `http` or `stdio`. HTTP **requires** `AUTH_TOKEN`. |
-| `PORT` | `8081` | Serves `/mcp`, `/media/<sha256>` and `/healthz`. |
-| `DATA_DIR` | `/data` | The only writable volume; holds `session.db` (whatsmeow identity), `cache.db` (chat/message cache), and `media/` (downloaded attachments). |
+| `PORT` | `8081` | Serves `/mcp`, `/media` (upload), `/media/<sha256>` (download) and `/healthz`. |
+| `DATA_DIR` | `/data` | The only writable volume; holds `session.db` (whatsmeow identity), `cache.db` (chat/message cache), and `media/` (attachment blobs, both downloaded and staged for sending). |
 | `AUTH_TOKEN` | *(unset)* | Bearer token required on every HTTP request, `/mcp` and `/media/` alike. Only the `/healthz` liveness probe is exempt. |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them is a fatal startup error — there is no TLS listener, so they only ever served plaintext. Terminate TLS in a reverse proxy. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error`. |
 | `LOG_FORMAT` | `json` | `json` or `text`. |
 | `MEDIA_MAX_BYTES` | `1073741824` (1 GiB) | Cap on `$DATA_DIR/media`. Over the cap, least-recently-requested blobs are evicted. `0` disables the cap. |
+| `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Where `send_audio_message` looks for ffmpeg to transcode non-Opus audio. Present in the `-slim` image; absent in the default distroless one, where non-Opus audio is refused instead. |
 | `MEDIA_TTL` | *(unset)* | Go duration (e.g. `168h`). Evicts media older than this. Unset/`0` disables age-based eviction. |
+| `MEDIA_MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Largest single `POST /media` body. Over it the request is refused with `413`; unlike `MEDIA_MAX_BYTES` this is a hard limit, not an eviction trigger. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | How often retention runs. A sweep also runs at startup regardless. |
 
 Full env-var contract: [REQUIREMENTS.md](REQUIREMENTS.md#configuration-environment-variables).
@@ -127,9 +130,16 @@ path, not via `-e` — `-e` exposes the secret to anyone who can read
 The server speaks plaintext HTTP and authenticates with a bearer token only.
 Transport encryption and client-certificate auth are the reverse proxy's job.
 
-## Media downloads
+## Media
 
-MCP cannot carry bytes usefully, so attachments are a two-step flow:
+MCP cannot carry bytes usefully, so attachments never travel through a tool
+call in either direction. Bytes move over plain HTTP on the **same port,
+with the same bearer token** as `/mcp`; tool calls only ever carry the
+`/media/<sha256>` pointer to them.
+
+### Downloading
+
+Receiving an attachment is a two-step flow:
 
 1. The agent calls the **`download_media`** tool with `chat_jid` +
    `message_id`. The container fetches the attachment from WhatsApp's CDN,
@@ -165,9 +175,56 @@ Attachments cached before the `media_direct_path` column existed (migration
 `download_media` returns `media_unavailable` for an old message, run
 `cache_sync` to re-ingest it and retry.
 
+### Sending
+
+Sending mirrors it, one step earlier:
+
+1. `POST` the bytes to **`/media`**. The container stores them
+   content-addressed and answers `201` with the same descriptor shape
+   `download_media` returns:
+
+   ```bash
+   curl -H "Authorization: Bearer $AUTH_TOKEN" \
+     -H "Content-Type: image/jpeg" \
+     --data-binary @holiday.jpg \
+     "http://localhost:8081/media?filename=holiday.jpg"
+   # {"media_path":"/media/<sha256>","mime":"image/jpeg","size":183422,...}
+   ```
+
+   `Content-Type` sets the mimetype (sniffed from the bytes when absent or
+   `application/octet-stream`) and `?filename=` names the file, which is
+   what a document send shows the recipient. Bodies over 100 MiB are
+   refused with `413`; identical bytes uploaded twice are one blob.
+
+2. The agent calls **`send_file`** (or **`send_audio_message`**) with that
+   `media_path`:
+
+   ```json
+   { "recipient": "34600111222", "media_path": "/media/<sha256>", "caption": "from the trip" }
+   ```
+
+   The envelope is chosen from the stored mimetype — `image/*` → image,
+   `video/*` → video, `audio/*` → audio, `image/webp` → sticker, anything
+   else → document — and `media_type` overrides that when the caller
+   disagrees. Forwarding works with no upload at all: pass a `media_path`
+   that `download_media` just returned.
+
+   `caption` belongs to `send_file` only, and only on image, video and
+   document envelopes: audio and sticker messages cannot carry one, so
+   passing it there is rejected rather than silently dropped.
+   `send_audio_message` takes `recipient`, `media_path` and `reply_to_id`.
+
+`send_audio_message` sends a **voice note** (PTT), which WhatsApp only plays
+as Ogg/Opus. Opus goes out as-is on either image variant; anything else
+needs `ffmpeg`. The `-slim` image ships it and transcodes transparently,
+while the default distroless image has none — there the call fails with
+`invalid_argument` rather than delivering a voice note nobody can play.
+Use `send_file` for a plain audio *attachment*, which accepts
+mp3/m4a/aac/amr directly.
+
 ## Tools
 
-Tools shipping today (32):
+Tools shipping today (34):
 
 - **Cache-backed reads** — `list_chats`, `list_conversations`, `get_chat`,
   `list_messages`, `get_message_context`, `get_last_interaction`,
@@ -175,13 +232,15 @@ Tools shipping today (32):
 - **Contacts** — `search_contacts`, `list_all_contacts`,
   `get_contact_details`, `resolve_jid`
 - **Groups** — `get_group_info`
-- **Sending** — `send_message` (text only today), `send_reaction`
+- **Sending** — `send_message` (text), `send_file` (image, video, audio,
+  document, sticker), `send_audio_message` (voice note / PTT),
+  `send_reaction`
 - **Polls** — `send_poll`, `vote_poll`, `get_poll_results`. Results are
   tallied from vote events as they arrive: WhatsApp offers no way to query
   a poll's standings, so votes cast before the device was linked (or while
   the container was down) are not counted.
 - **Media** — `download_media` (returns a descriptor; bytes come from
-  `GET /media/<sha256>`)
+  `GET /media/<sha256>`, and go in via `POST /media`)
 - **Account & presence** (all of these are visible to other WhatsApp
   users) — `set_status_message`, `send_presence`, `send_chat_presence`,
   `subscribe_presence`, `set_disappearing_timer`,
@@ -198,8 +257,8 @@ cached against the contact; read it back through `get_contact_details`
 (`presence_observed`, `is_online`, `last_seen_ts`).
 
 For the full picture — including the long list of `whatsmeow`
-capabilities not yet exposed (media send, edits, group
-admin, newsletters, privacy/blocklist, …) — see
+capabilities not yet exposed (edits, group admin, newsletters,
+privacy/blocklist, …) — see
 [SUPPORTED.md](SUPPORTED.md). Intentional divergences from the prior
 Python reference's argument shapes are tracked in
 [CHANGES.md](CHANGES.md).
@@ -234,10 +293,13 @@ Full pairing contract — events, error codes — is in
 - **Healthcheck is built-in** — `whatsapp-mcp --healthcheck` probes the
   unauthenticated `http://127.0.0.1:$PORT/healthz` liveness endpoint. No shell
   or curl needed in the distroless image.
-- **Media is a bounded cache.** `$DATA_DIR/media` holds attachments fetched
-  by `download_media`, capped by `MEDIA_MAX_BYTES` / `MEDIA_TTL`. Evicted
-  blobs are re-downloaded on the next `download_media` call, so losing them
-  costs a round trip, not data.
+- **Media is a bounded store.** `$DATA_DIR/media` holds both attachments
+  fetched by `download_media` and bytes staged via `POST /media`, capped by
+  `MEDIA_MAX_BYTES` / `MEDIA_TTL` (and per-request by
+  `MEDIA_MAX_UPLOAD_BYTES`). Evicting a *downloaded* blob costs a round trip
+  on the next `download_media` call, not data — but an *uploaded* blob has
+  no origin to re-fetch from, so upload shortly before you send, and treat a
+  `not_found` from `send_file` as "upload it again".
 - **Rootless Podman**: the image runs as UID 1000 (non-root). Named volumes
   are initialised with the correct ownership automatically. If you switch to a
   bind mount instead, add `--userns=keep-id` so the host directory is writable

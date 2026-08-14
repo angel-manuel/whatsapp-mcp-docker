@@ -48,12 +48,22 @@ type Config struct {
 	// MediaSweepInterval is how often retention runs. A sweep also runs at
 	// startup regardless of this value.
 	MediaSweepInterval time.Duration
+	// MediaMaxUploadBytes caps a single POST /media body. Unlike
+	// MediaMaxBytes this is a hard refusal (413), not an eviction trigger:
+	// it bounds what one request can push onto the volume between sweeps.
+	// Zero means media.DefaultMaxUploadBytes.
+	MediaMaxUploadBytes int64
 }
 
 // DefaultMediaMaxBytes is the out-of-the-box cap on {DataDir}/media: 1 GiB.
-// Media is a re-downloadable cache, not a system of record, so it ships with
-// a bound rather than growing until the volume fills.
+// Media is mostly a re-downloadable cache, so it ships with a bound rather
+// than growing until the volume fills.
 const DefaultMediaMaxBytes int64 = 1 << 30
+
+// DefaultMediaMaxUploadBytes is the out-of-the-box cap on a single
+// POST /media body: 100 MiB. It exists so one oversized request cannot fill
+// the volume before the retention sweeper next runs.
+const DefaultMediaMaxUploadBytes int64 = 100 << 20
 
 // MediaDir is the directory holding blobs downloaded by the download_media
 // tool and served by GET /media/{sha256}.
@@ -95,6 +105,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.MediaSweepInterval, err = getEnvDuration("MEDIA_SWEEP_INTERVAL", time.Hour); err != nil {
+		return nil, err
+	}
+	if cfg.MediaMaxUploadBytes, err = getEnvInt64("MEDIA_MAX_UPLOAD_BYTES", DefaultMediaMaxUploadBytes); err != nil {
 		return nil, err
 	}
 
@@ -143,6 +156,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MediaSweepInterval < 0 {
 		return fmt.Errorf("MEDIA_SWEEP_INTERVAL must not be negative, got %s", c.MediaSweepInterval)
+	}
+	if c.MediaMaxUploadBytes < 0 {
+		return fmt.Errorf("MEDIA_MAX_UPLOAD_BYTES must not be negative, got %d", c.MediaMaxUploadBytes)
 	}
 
 	if c.Transport == TransportHTTP {
