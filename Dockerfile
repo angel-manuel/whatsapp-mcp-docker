@@ -1,11 +1,17 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- Builder -----------------------------------------------------------------
-# Pinned by digest for reproducible builds. To bump: resolve the current digest
-# of the target tag (docker manifest inspect / registry HEAD) and update both
-# the tag hint (after the digest, for humans) and the digest itself.
-ARG GO_VERSION=1.26
-FROM golang:${GO_VERSION}-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS builder
+# Pinned by digest for reproducible builds. Dependabot keeps the digest current;
+# to bump by hand, resolve the digest of the target tag (docker manifest inspect
+# / registry HEAD) and update both the tag hint and the digest.
+#
+# The version is written inline rather than behind an ARG: Dependabot's tag
+# grammar is [\w][\w.-]* and cannot parse a ${...} interpolation, so an
+# ARG-built tag silently opts this image out of automated updates. Nothing
+# passed --build-arg GO_VERSION, so the indirection bought nothing.
+#
+# Keep the major.minor in step with the `go` directive in go.mod.
+FROM golang:1.26-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS builder
 
 WORKDIR /src
 
