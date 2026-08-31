@@ -303,11 +303,17 @@ func MediaUnavailableError(message string) *mcpgo.CallToolResult {
 // device is linked does a dead socket become the interesting failure
 // (not_connected).
 //
-// Tools whose names appear in exempt are passed through unconditionally;
-// this is how the pairing tools themselves (and the ping health check)
-// remain callable before the device has been linked — and, equally,
-// while it is linked but offline.
-func pairingMiddleware(state PairingState, exempt map[string]struct{}) mcpserver.ToolHandlerMiddleware {
+// Three tiers of tool:
+//
+//   - exempt — passed through unconditionally. The pairing tools and the
+//     ping health check must answer before the device is linked, and
+//     while it is linked but offline.
+//   - cacheOnly — requires a linked device but not a live socket. These
+//     read exclusively from the local cache, so a dead connection has no
+//     bearing on whether they can answer; failing them during an outage
+//     withholds data that is sitting on disk and needs no network.
+//   - everything else — requires both.
+func pairingMiddleware(state PairingState, exempt, cacheOnly map[string]struct{}) mcpserver.ToolHandlerMiddleware {
 	return func(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 		return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 			if _, ok := exempt[req.Params.Name]; ok {
@@ -317,7 +323,7 @@ func pairingMiddleware(state PairingState, exempt map[string]struct{}) mcpserver
 				if !state.IsPaired() {
 					return NotPairedError(), nil
 				}
-				if !state.IsConnected() {
+				if _, servesFromCache := cacheOnly[req.Params.Name]; !servesFromCache && !state.IsConnected() {
 					return NotConnectedError(), nil
 				}
 			}

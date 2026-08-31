@@ -157,6 +157,8 @@ Until the client is ready, every MCP tool call MUST return a structured error wi
 
 Collapsing the two (gating on "logged in" alone) MUST NOT happen: it reports a linked-but-offline client as `not_paired`, which directs the caller to `pairing_start`, which then refuses with `already_paired` because the device row is still present — a closed loop with no exit.
 
+Tools that answer purely from the local cache MUST be exempt from `not_connected` (but NOT from `not_paired`). A dead socket has no bearing on whether the cache can be read, and refusing those calls withholds data already on disk: during the 2026-08-24 outage the cache held 543 chats and 17k messages that no tool would return. The exempt set MUST be derived from the registration boundary — the tools registered by `internal/mcptools`, whose `Register` accepts a `*cache.Store` and nothing else — rather than restated as a literal list that can drift from it.
+
 ## Session persistence
 
 - `/data` is the only persistent volume; nuke it to fully reset the device identity.

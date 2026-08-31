@@ -242,6 +242,14 @@ func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store, mediaStore 
 	if err := mcptools.Register(reg, cacheStore); err != nil {
 		return nil, fmt.Errorf("register cache tools: %w", err)
 	}
+	// Everything registered so far came from mcptools, whose Register takes
+	// a *cache.Store and nothing else — those tools have no way to reach the
+	// network even in principle. Reading the names back off the registry at
+	// this exact point derives the cache-only set from that structural fact
+	// instead of restating it as a list that can drift: a tool added to
+	// mcptools is offline-capable automatically, and one that grows a
+	// whatsmeow dependency cannot be registered here in the first place.
+	cacheOnly := reg.Names()
 	// The media byte routes ride the MCP listener: same port, same
 	// AUTH_TOKEN, same bearer middleware. They exist for the one thing MCP
 	// cannot do — transfer bytes — and deliberately do not reopen the
@@ -252,12 +260,13 @@ func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store, mediaStore 
 		media.UploadRoutePattern:       mediaStore.UploadHandler(),
 	}
 	return mcp.New(mcp.Config{
-		Transport: mcp.TransportMode(s.cfg.Transport),
-		BindAddr:  s.cfg.BindAddr,
-		Port:      s.cfg.Port,
-		AuthToken: s.cfg.AuthToken,
-		Name:      "whatsapp-mcp",
-		Version:   Version,
-		Routes:    routes,
+		Transport:      mcp.TransportMode(s.cfg.Transport),
+		BindAddr:       s.cfg.BindAddr,
+		Port:           s.cfg.Port,
+		AuthToken:      s.cfg.AuthToken,
+		Name:           "whatsapp-mcp",
+		Version:        Version,
+		Routes:         routes,
+		CacheOnlyTools: cacheOnly,
 	}, s.log, reg, pairing)
 }

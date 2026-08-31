@@ -282,6 +282,14 @@ error until the client is ready:
 | `not_paired` | No device credentials on disk — never linked, or unlinked from the phone. | Run `pairing_start`. |
 | `not_connected` | Linked, but the socket is not currently authenticated. | Nothing; auto-reconnect retries. Just retry the call. |
 
+Cache-backed reads (`list_chats`, `list_messages`, `get_conversation` and
+the rest of the read surface) are exempt from `not_connected`: they answer
+from the local SQLite cache and need no socket, so they keep working while
+the connection is down. They still require a linked device — with nothing
+ever paired there is no cache to read. Anything that touches the network
+(sending, group metadata, presence, media downloads) fails with
+`not_connected` until the socket recovers.
+
 The two are deliberately distinct. Reporting a linked-but-offline client
 as `not_paired` would send callers to `pairing_start`, which refuses with
 `already_paired` because the device row is still on disk — a closed loop

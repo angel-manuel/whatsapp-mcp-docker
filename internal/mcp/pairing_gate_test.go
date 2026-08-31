@@ -258,3 +258,77 @@ func TestHealthz_LeaksNoIdentity(t *testing.T) {
 		t.Errorf("body missing status key: %v", body)
 	}
 }
+
+// newCacheOnlyServer builds a stdio server whose gate treats the named
+// tools as cache-backed.
+func newCacheOnlyServer(t *testing.T, pairing PairingState, cacheOnly ...string) *Server {
+	t.Helper()
+	srv, err := New(Config{
+		Transport:      TransportStdio,
+		Name:           "whatsapp-mcp-test",
+		Version:        "test",
+		CacheOnlyTools: cacheOnly,
+	}, newTestLogger(), nil, pairing)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return srv
+}
+
+// TestGate_CacheOnlyToolsAnswerWhileOffline is the point of the
+// cache-only tier: during the six-day outage the local cache held every
+// chat and message, needing no socket to read, yet every read was refused.
+func TestGate_CacheOnlyToolsAnswerWhileOffline(t *testing.T) {
+	t.Parallel()
+
+	srv := newCacheOnlyServer(t, pairedOffline, "list_chats")
+	registerFixtureTool(t, srv, "list_chats")
+	registerFixtureTool(t, srv, "send_message")
+	call := startedStdioClient(t, srv)
+
+	if res := call("list_chats"); res.IsError {
+		t.Errorf("cache-only tool must answer while offline, got %+v", structuredOf(t, res))
+	}
+
+	// A tool that genuinely needs the socket is unaffected by the tier.
+	res := call("send_message")
+	if !res.IsError {
+		t.Fatalf("network tool must still be gated while offline, got %+v", res)
+	}
+	if got := structuredOf(t, res)["code"]; got != string(ErrNotConnected) {
+		t.Errorf("code=%v, want %q", got, ErrNotConnected)
+	}
+}
+
+// TestGate_CacheOnlyToolsStillRequirePairing pins the deliberate boundary:
+// the tier waives the connection check only. With no device ever linked
+// there is no cache to read, and the pre-pair contract is unchanged.
+func TestGate_CacheOnlyToolsStillRequirePairing(t *testing.T) {
+	t.Parallel()
+
+	srv := newCacheOnlyServer(t, fixedState{}, "list_chats")
+	registerFixtureTool(t, srv, "list_chats")
+	call := startedStdioClient(t, srv)
+
+	res := call("list_chats")
+	if !res.IsError {
+		t.Fatalf("cache-only tool must still be gated pre-pair, got %+v", res)
+	}
+	if got := structuredOf(t, res)["code"]; got != string(ErrNotPaired) {
+		t.Errorf("code=%v, want %q", got, ErrNotPaired)
+	}
+}
+
+// TestGate_CacheOnlyToolsUnaffectedWhenHealthy verifies the tier changes
+// nothing on the happy path.
+func TestGate_CacheOnlyToolsUnaffectedWhenHealthy(t *testing.T) {
+	t.Parallel()
+
+	srv := newCacheOnlyServer(t, fixedState{paired: true, connected: true}, "list_chats")
+	registerFixtureTool(t, srv, "list_chats")
+	call := startedStdioClient(t, srv)
+
+	if res := call("list_chats"); res.IsError {
+		t.Errorf("cache-only tool must answer when healthy, got %+v", structuredOf(t, res))
+	}
+}
