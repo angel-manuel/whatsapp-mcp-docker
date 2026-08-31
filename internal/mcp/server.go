@@ -54,6 +54,14 @@ type Config struct {
 	// bytes — today GET /media/{sha256} outbound and POST /media inbound.
 	// Anything that can be a tool stays a tool.
 	Routes map[string]http.Handler
+	// CacheOnlyTools names tools that answer purely from the local cache
+	// and therefore stay callable while the device is linked but offline.
+	// They are still gated on pairing; only the connection check is waived.
+	//
+	// The caller supplies this rather than the list living here because
+	// only the wiring layer knows which registrations were handed a cache
+	// store and nothing else. See internal/server.buildMCP.
+	CacheOnlyTools []string
 }
 
 // Server is a transport-agnostic MCP server wrapping mcp-go. It holds
@@ -64,6 +72,8 @@ type Server struct {
 	log     *slog.Logger
 	reg     *Registry
 	pairing PairingState
+	// cacheOnly is Config.CacheOnlyTools as a set, built once in New.
+	cacheOnly map[string]struct{}
 
 	// mu guards the single-Run invariant.
 	mu      sync.Mutex
@@ -89,7 +99,11 @@ func New(cfg Config, log *slog.Logger, reg *Registry, pairing PairingState) (*Se
 	if err := registerBuiltins(reg, pairing); err != nil {
 		return nil, fmt.Errorf("register builtins: %w", err)
 	}
-	return &Server{cfg: cfg, log: log, reg: reg, pairing: pairing}, nil
+	cacheOnly := make(map[string]struct{}, len(cfg.CacheOnlyTools))
+	for _, name := range cfg.CacheOnlyTools {
+		cacheOnly[name] = struct{}{}
+	}
+	return &Server{cfg: cfg, log: log, reg: reg, pairing: pairing, cacheOnly: cacheOnly}, nil
 }
 
 func (c Config) validate() error {
@@ -165,7 +179,7 @@ func (s *Server) buildCore() *mcpserver.MCPServer {
 	core := mcpserver.NewMCPServer(
 		s.cfg.Name, s.cfg.Version,
 		mcpserver.WithToolCapabilities(true),
-		mcpserver.WithToolHandlerMiddleware(pairingMiddleware(s.pairing, exemptFromPairingGate)),
+		mcpserver.WithToolHandlerMiddleware(pairingMiddleware(s.pairing, exemptFromPairingGate, s.cacheOnly)),
 		mcpserver.WithRecovery(),
 	)
 	s.reg.apply(core)
