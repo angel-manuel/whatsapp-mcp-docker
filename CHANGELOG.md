@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.3](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.7.2...v0.7.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* **deps:** bump the base-images group with 3 updates ([2221aac](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/2221aac65029bc8d30b585512240cf1d582099bf))
+* **deps:** bump the go-dependencies group with 2 updates ([2f5f01f](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/2f5f01f04180c128e600ff33cb8822e6ba0994ec))
+
 ## [0.7.2](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.7.1...v0.7.2) (2026-08-31)
 
 
