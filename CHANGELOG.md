@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.2](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.7.1...v0.7.2) (2026-08-31)
+
+
+### Bug Fixes
+
+* **deps:** bump whatsmeow to restore connectivity (405 client outdated) ([3b0ff90](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/3b0ff904ba5c37e83ccdf83ed12c33c739f9c340))
+* **deps:** bump whatsmeow to restore connectivity (405 client outdated) ([03a646b](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/03a646bb5be80cd6848ceff47014b7718adcc1e4))
+* **gate:** let cache-backed reads answer while the socket is down ([14ee8e6](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/14ee8e68c22816c9dbb1cc8b61d96019f4f28394))
+* **gate:** let cache-backed reads answer while the socket is down ([2facea6](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/2facea660ab8f8eb5620c42b03ea3cc90a72fdea))
+
 ## [0.7.1](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.7.0...v0.7.1) (2026-08-31)
 
 
