@@ -11,7 +11,7 @@
 # passed --build-arg GO_VERSION, so the indirection bought nothing.
 #
 # Keep the major.minor in step with the `go` directive in go.mod.
-FROM golang:1.26-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS builder
+FROM golang:1.27-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS builder
 
 WORKDIR /src
 
@@ -37,7 +37,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # distroless/static: no shell, no package manager, minimal CA bundle + tzdata.
 # Digest pin matches distroless/static-debian12:nonroot at build time; refresh
 # alongside the builder digest whenever either moves.
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 COPY --from=builder /out/whatsapp-mcp /usr/local/bin/whatsapp-mcp
 

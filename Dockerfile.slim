@@ -7,7 +7,7 @@
 # ---- Builder -----------------------------------------------------------------
 # Version inline, not behind an ARG — see the note in Dockerfile: a ${...} tag
 # is unparseable to Dependabot and would opt this image out of digest updates.
-FROM golang:1.26-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS builder
+FROM golang:1.27-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS builder
 
 WORKDIR /src
 
@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
       ./cmd/whatsapp-mcp
 
 # ---- Runtime -----------------------------------------------------------------
-FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 # ffmpeg covers the `send_audio_message` transcode path; ca-certificates is
 # required for TLS to WhatsApp; tini keeps signal forwarding and zombie reaping
