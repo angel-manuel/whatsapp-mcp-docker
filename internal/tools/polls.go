@@ -203,7 +203,7 @@ func sendPoll(deps Deps) mcp.Handler {
 		msg, err := deps.WA.BuildPollCreation(question, options, selectable)
 		if err != nil {
 			if errors.Is(err, wa.ErrNotLoggedIn) {
-				return mcp.NotPairedError(), nil
+				return mcp.NotConnectedError(), nil
 			}
 			return mcp.ErrorResult(mcp.ErrInternal, fmt.Sprintf("build poll: %v", err)), nil
 		}
@@ -211,7 +211,7 @@ func sendPoll(deps Deps) mcp.Handler {
 		resp, err := deps.WA.SendMessage(ctx, to, msg)
 		if err != nil {
 			if errors.Is(err, wa.ErrNotLoggedIn) {
-				return mcp.NotPairedError(), nil
+				return mcp.NotConnectedError(), nil
 			}
 			return mcp.ErrorResult(mcp.ErrInternal, fmt.Sprintf("send poll: %v", err)), nil
 		}
@@ -298,7 +298,7 @@ func votePoll(deps Deps) mcp.Handler {
 		if err != nil {
 			switch {
 			case errors.Is(err, wa.ErrNotLoggedIn):
-				return mcp.NotPairedError(), nil
+				return mcp.NotConnectedError(), nil
 			case errors.Is(err, whatsmeow.ErrOriginalMessageSecretNotFound):
 				return mcp.NotFoundError(fmt.Sprintf(
 					"poll %s cannot be voted on: this device never held its encryption secret, "+
@@ -314,7 +314,7 @@ func votePoll(deps Deps) mcp.Handler {
 		resp, err := deps.WA.SendMessage(ctx, to, msg)
 		if err != nil {
 			if errors.Is(err, wa.ErrNotLoggedIn) {
-				return mcp.NotPairedError(), nil
+				return mcp.NotConnectedError(), nil
 			}
 			return mcp.InternalError(fmt.Sprintf("send poll vote: %v", err)), nil
 		}

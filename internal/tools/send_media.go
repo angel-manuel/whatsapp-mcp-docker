@@ -248,7 +248,7 @@ func sendUploaded(ctx context.Context, deps Deps, to types.JID, kind mediaKind,
 	resp, err := deps.WA.SendMessage(ctx, to, msg)
 	if err != nil {
 		if errors.Is(err, wa.ErrNotLoggedIn) {
-			return mcp.NotPairedError(), nil
+			return mcp.NotConnectedError(), nil
 		}
 		return mcp.ErrorResult(mcp.ErrInternal, fmt.Sprintf("send %s message: %v", kind, err)), nil
 	}

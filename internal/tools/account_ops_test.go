@@ -78,13 +78,13 @@ func TestSetStatusMessage_CountsRunesNotBytes(t *testing.T) {
 	}
 }
 
-func TestSetStatusMessage_NotLoggedInMapsToNotPaired(t *testing.T) {
+func TestSetStatusMessage_NotLoggedInMapsToNotConnected(t *testing.T) {
 	t.Parallel()
 	mock := &mockWA{statusMsgErr: wa.ErrNotLoggedIn}
 	h := newHarness(t, true, nil, mock)
 
 	res := callTool(t, h, "set_status_message", map[string]any{"text": "hi"})
-	expectError(t, res, mcp.ErrNotPaired)
+	expectError(t, res, mcp.ErrNotConnected)
 }
 
 // --- send_presence --------------------------------------------------------
@@ -205,7 +205,7 @@ func TestSendChatPresence_RejectsAudioWithPaused(t *testing.T) {
 	}
 }
 
-func TestSendChatPresence_NotLoggedInMapsToNotPaired(t *testing.T) {
+func TestSendChatPresence_NotLoggedInMapsToNotConnected(t *testing.T) {
 	t.Parallel()
 	mock := &mockWA{chatPresenceErr: wa.ErrNotLoggedIn}
 	h := newHarness(t, true, nil, mock)
@@ -214,7 +214,7 @@ func TestSendChatPresence_NotLoggedInMapsToNotPaired(t *testing.T) {
 		"chat_jid": "111@s.whatsapp.net",
 		"state":    "composing",
 	})
-	expectError(t, res, mcp.ErrNotPaired)
+	expectError(t, res, mcp.ErrNotConnected)
 }
 
 func TestSendChatPresence_RejectsNewsletterChat(t *testing.T) {
@@ -467,13 +467,13 @@ func TestSetDefaultDisappearingTimer_Forwards(t *testing.T) {
 	}
 }
 
-func TestSetDefaultDisappearingTimer_NotLoggedInMapsToNotPaired(t *testing.T) {
+func TestSetDefaultDisappearingTimer_NotLoggedInMapsToNotConnected(t *testing.T) {
 	t.Parallel()
 	mock := &mockWA{defaultTimerErr: wa.ErrNotLoggedIn}
 	h := newHarness(t, true, nil, mock)
 
 	res := callTool(t, h, "set_default_disappearing_timer", map[string]any{"duration": "off"})
-	expectError(t, res, mcp.ErrNotPaired)
+	expectError(t, res, mcp.ErrNotConnected)
 }
 
 func TestSetDefaultDisappearingTimer_RejectsUnsupportedDuration(t *testing.T) {
@@ -629,7 +629,7 @@ func TestMarkRead_FailedReceiptLeavesUnreadFlag(t *testing.T) {
 		"chat_jid":    "111@s.whatsapp.net",
 		"message_ids": []any{"MSG1"},
 	})
-	expectError(t, res, mcp.ErrNotPaired)
+	expectError(t, res, mcp.ErrNotConnected)
 	if got := unreadCount(t, h, "111@s.whatsapp.net"); got != 1 {
 		t.Errorf("unread_count=%d, want 1 — the receipt never went out", got)
 	}

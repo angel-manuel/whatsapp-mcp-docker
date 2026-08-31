@@ -11,8 +11,10 @@ import (
 )
 
 // ErrNotLoggedIn is returned by the read-side lookups when the underlying
-// whatsmeow client is not currently logged in. Callers should typically
-// translate this into a not_paired tool error.
+// whatsmeow client is not currently logged in. Callers should translate this
+// into a not_connected tool error: the socket is down, but the device is
+// still linked, so not_paired would point the caller at pairing_start — which
+// refuses with already_paired.
 var ErrNotLoggedIn = errors.New("wa: not logged in")
 
 // GroupInfo fetches authoritative group metadata from the WhatsApp server
@@ -92,7 +94,7 @@ func (c *Client) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Messa
 // we sent ourselves.
 //
 // Returns nil when no whatsmeow client is available yet (pre-pair); callers
-// surface that as not_paired rather than sending a malformed stanza.
+// surface that rather than sending a malformed stanza.
 func (c *Client) BuildReaction(chat, sender types.JID, id types.MessageID, emoji string) *waE2E.Message {
 	wm := c.snapshotWM()
 	if wm == nil {

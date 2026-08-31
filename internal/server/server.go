@@ -83,11 +83,16 @@ func (s *Server) Run(ctx context.Context) error {
 	// wired (see SetPollDecrypter below). WhatsApp flushes its offline queue
 	// immediately after login, so an event handler that is still missing a
 	// dependency at that moment misses the burst, not a stray event.
+	// Logger: without this wa.Open falls back to waLog.Noop and every
+	// whatsmeow lifecycle record — reconnect attempts, connect failures,
+	// stream errors — is dropped, leaving a socket that dies and never
+	// recovers with no trace in the logs at all.
 	waCli, err := wa.Open(context.Background(), wa.Config{
 		DataDir:        s.cfg.DataDir,
 		PairDeviceName: s.cfg.PairDeviceName,
 		EventHook:      ingestor.HandleEvent,
 		DeferConnect:   true,
+		Logger:         wa.SlogAdapter(applog.WithEvent(s.log, "wa.whatsmeow")),
 	})
 	if err != nil {
 		return fmt.Errorf("wa open: %w", err)
@@ -211,15 +216,28 @@ func (s *Server) Run(ctx context.Context) error {
 	return runErr
 }
 
+// waPairingState binds the MCP gate's two predicates to the whatsmeow
+// client. They must stay separate: IsPaired asks the on-disk device
+// store, IsConnected asks the live socket, and collapsing both into
+// LoggedIn (as this once did) reports a linked-but-offline client as
+// not_paired — which sends callers to pairing_start, which then refuses
+// with already_paired because the device row is still there.
+type waPairingState struct{ cli *wa.Client }
+
+// IsPaired reports whether device credentials exist on disk. This is the
+// same predicate wa.StartPairing uses to reject with ErrAlreadyPaired, so
+// the gate and the pairing tools can no longer disagree.
+func (w waPairingState) IsPaired() bool { return w.cli.IsPaired() }
+
+// IsConnected reports whether the socket is authenticated right now.
+func (w waPairingState) IsConnected() bool { return w.cli.Status().LoggedIn }
+
 // buildMCP constructs the MCP subsystem, binds its pairing gate to the
-// whatsmeow client (tools fail with not_paired until the device is both
-// paired AND logged in), and registers the read-side cache-backed tools
-// against its registry.
+// whatsmeow client (tools fail with not_paired until the device is linked,
+// then with not_connected until the socket is live), and registers the
+// read-side cache-backed tools against its registry.
 func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store, mediaStore *media.Store) (*mcp.Server, error) {
-	pairing := mcp.PairingStateFunc(func() bool {
-		st := waCli.Status()
-		return st.LoggedIn
-	})
+	pairing := waPairingState{cli: waCli}
 	reg := mcp.NewRegistry()
 	if err := mcptools.Register(reg, cacheStore); err != nil {
 		return nil, fmt.Errorf("register cache tools: %w", err)

@@ -232,7 +232,7 @@ func ffmpegMissingMessage(deps Deps, mimeType string) string {
 
 func uploadFailure(kind mediaKind, err error) *mcpgo.CallToolResult {
 	if errors.Is(err, wa.ErrNotLoggedIn) {
-		return mcp.NotPairedError()
+		return mcp.NotConnectedError()
 	}
 	return mcp.ErrorResult(mcp.ErrMediaUnavailable,
 		fmt.Sprintf("upload %s to the WhatsApp CDN failed: %v", kind, err))

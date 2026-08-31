@@ -168,7 +168,7 @@ func TestSendPoll_UnstorableSecretIsReportedAsFailure(t *testing.T) {
 	}
 }
 
-func TestSendPoll_BuildFailureWithoutSessionIsNotPaired(t *testing.T) {
+func TestSendPoll_BuildFailureWithoutSessionIsNotConnected(t *testing.T) {
 	t.Parallel()
 	mock := pollMock("wamid.POLL1")
 	mock.buildPollErr = wa.ErrNotLoggedIn
@@ -181,7 +181,7 @@ func TestSendPoll_BuildFailureWithoutSessionIsNotPaired(t *testing.T) {
 	})
 	// The mcp gate says paired, but the session died underneath it; the tool
 	// has to translate that rather than reporting an opaque internal error.
-	expectError(t, res, mcp.ErrNotPaired)
+	expectError(t, res, mcp.ErrNotConnected)
 	if mock.sendCalls != 0 {
 		t.Errorf("sendCalls = %d, want 0", mock.sendCalls)
 	}

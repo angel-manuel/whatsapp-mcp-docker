@@ -20,10 +20,15 @@ var pingSchema = json.RawMessage(`{
 }`)
 
 // PingResult is the structured output of the ping tool.
+//
+// Paired and Connected are reported separately so a caller can tell a
+// device that was never linked from one that is linked but offline —
+// the same distinction the not_paired / not_connected error codes draw.
 type PingResult struct {
 	Pong      bool   `json:"pong"`
 	Echo      string `json:"echo,omitempty"`
 	Paired    bool   `json:"paired"`
+	Connected bool   `json:"connected"`
 	Timestamp string `json:"timestamp"`
 }
 
@@ -46,6 +51,7 @@ func registerBuiltins(reg *Registry, state PairingState) error {
 				Pong:      true,
 				Echo:      in.Echo,
 				Paired:    state != nil && state.IsPaired(),
+				Connected: state != nil && state.IsConnected(),
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			}, nil
 		},

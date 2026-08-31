@@ -766,7 +766,7 @@ func TestGetGroupInfo_RejectsNonGroupJID(t *testing.T) {
 	expectError(t, res, mcp.ErrInvalidArgument)
 }
 
-func TestGetGroupInfo_NotLoggedInShortCircuitsToNotPaired(t *testing.T) {
+func TestGetGroupInfo_NotLoggedInShortCircuitsToNotConnected(t *testing.T) {
 	t.Parallel()
 	groupJID := types.NewJID("chatid", types.GroupServer)
 	mock := &mockWA{
@@ -777,7 +777,7 @@ func TestGetGroupInfo_NotLoggedInShortCircuitsToNotPaired(t *testing.T) {
 	h := newHarness(t, true, nil, mock)
 
 	res := callTool(t, h, "get_group_info", map[string]any{"group_jid": groupJID.String()})
-	expectError(t, res, mcp.ErrNotPaired)
+	expectError(t, res, mcp.ErrNotConnected)
 }
 
 func TestTools_NotPairedShortCircuits(t *testing.T) {
@@ -987,7 +987,7 @@ func TestSendMessage_SendErrorPropagates_NoCacheRow(t *testing.T) {
 	}
 }
 
-func TestSendMessage_NotLoggedInMapsToNotPaired(t *testing.T) {
+func TestSendMessage_NotLoggedInMapsToNotConnected(t *testing.T) {
 	t.Parallel()
 	mock := &mockWA{
 		ownJID:  types.NewJID("15551234567", types.DefaultUserServer),
@@ -999,7 +999,7 @@ func TestSendMessage_NotLoggedInMapsToNotPaired(t *testing.T) {
 		"recipient": "447700123456",
 		"text":      "hi",
 	})
-	expectError(t, res, mcp.ErrNotPaired)
+	expectError(t, res, mcp.ErrNotConnected)
 }
 
 func TestSendMessage_ValidationErrors(t *testing.T) {
@@ -1455,7 +1455,7 @@ func TestSendReaction_RejectsInvalidEmoji(t *testing.T) {
 	}
 }
 
-func TestSendReaction_NotLoggedInMapsToNotPaired(t *testing.T) {
+func TestSendReaction_NotLoggedInMapsToNotConnected(t *testing.T) {
 	t.Parallel()
 	mock := &mockWA{
 		ownJID:  types.NewJID("15551234567", types.DefaultUserServer),
@@ -1466,5 +1466,5 @@ func TestSendReaction_NotLoggedInMapsToNotPaired(t *testing.T) {
 	res := callTool(t, h, "send_reaction", map[string]any{
 		"chat_jid": "777@g.us", "message_id": "m-theirs", "emoji": "👍",
 	})
-	expectError(t, res, mcp.ErrNotPaired)
+	expectError(t, res, mcp.ErrNotConnected)
 }

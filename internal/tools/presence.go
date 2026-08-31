@@ -322,7 +322,7 @@ func accountOpError(op string, err error) any {
 	case errors.Is(err, wa.ErrNotLoggedIn),
 		errors.Is(err, whatsmeow.ErrNotLoggedIn),
 		errors.Is(err, whatsmeow.ErrClientIsNil):
-		return mcp.NotPairedError()
+		return mcp.NotConnectedError()
 	case errors.Is(err, whatsmeow.ErrNoPushName):
 		// The device is paired but has not finished its first connect, so
 		// whatsmeow has no push name to attach to the presence stanza.
