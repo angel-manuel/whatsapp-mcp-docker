@@ -1,0 +1,96 @@
+# Dependabot configuration.
+#
+# Policy: nothing lands until it has been public for a week, except
+# whatsmeow, which lands as soon as it appears.
+#
+# The asymmetry is deliberate and was paid for. whatsmeow hardcodes the
+# WhatsApp client version it presents during the handshake; when WhatsApp
+# retires that version the server answers every connect with 405 "client
+# outdated" and auto-reconnect can never recover. That is what took
+# production down from 2026-08-24 to 2026-08-31. A stale whatsmeow is not
+# a deferred improvement, it is a scheduled outage — so it skips the
+# cooldown, while everything else waits out the window where a fresh
+# release gets yanked or patched.
+#
+# `interval` is how often Dependabot looks; `cooldown` is how old a version
+# must be before it may be proposed. Checking daily with a 7-day cooldown
+# means a qualifying update opens promptly on day 7 rather than waiting for
+# the next weekly sweep.
+version: 2
+
+updates:
+  # Go modules — compiled directly into the shipped binary.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+    # fix(deps) rather than chore: these ship to users, and release-please
+    # must cut a release for the update to reach anyone. The whatsmeow
+    # outage was fixed in code days before it was fixed in production.
+    commit-message:
+      prefix: "fix"
+      include: "scope"
+    cooldown:
+      default-days: 7
+      exclude:
+        # See the header. Connectivity depends on this being current.
+        - "go.mau.fi/whatsmeow"
+    groups:
+      # Kept out of the batch so it is never held back by an unrelated
+      # dependency's cooldown, and so its PR is reviewable on its own.
+      whatsmeow:
+        patterns:
+          - "go.mau.fi/whatsmeow"
+      go-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "go.mau.fi/whatsmeow"
+
+  # Base images. The runtime bases (distroless, debian-slim) ship to users,
+  # so a CVE fix in them has to be released — hence fix(deps), same as Go
+  # modules.
+  #
+  # Both Dockerfile and Dockerfile.slim are covered: Dependabot's matcher is
+  # an unanchored /dockerfile|containerfile/i against the filename.
+  #
+  # The builder image tag is written inline rather than via an ARG for this
+  # reason: Dependabot's tag grammar ([\w][\w.-]*) cannot parse a ${...}
+  # interpolation, and an ARG-built tag is skipped without any diagnostic.
+  # Review golang bumps against the `go` directive in go.mod before merging.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "fix"
+      include: "scope"
+    cooldown:
+      default-days: 7
+    groups:
+      base-images:
+        patterns:
+          - "*"
+
+  # Workflow actions. CI-only: they never reach the published image, so
+  # these use the `ci` type, which release-please keeps out of the
+  # changelog and which does not cut a release.
+  #
+  # Note this covers `uses:` refs only. The golangci-lint *binary* version
+  # is passed as a `with: version:` input and is invisible to Dependabot;
+  # it still has to be bumped by hand.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
