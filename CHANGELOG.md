@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.7.0...v0.7.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* **pairing:** split not_paired from not_connected, log whatsmeow, gate healthz ([08e1079](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/08e1079bef802f2e3cb6e291afd09e5597bcab03))
+* **pairing:** split not_paired from not_connected, log whatsmeow, gate healthz ([5550198](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/555019814f59a52eb0d31c221246a3c06942a33c))
+
 ## [0.7.0](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.6.0...v0.7.0) (2026-08-14)
 
 
