@@ -1,6 +1,6 @@
 module github.com/angel-manuel/whatsapp-mcp-docker
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/mark3labs/mcp-go v0.58.0
