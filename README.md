@@ -110,7 +110,7 @@ Most operators only touch these:
 | `TRANSPORT` | `http` | `http` or `stdio`. HTTP **requires** `AUTH_TOKEN`. |
 | `PORT` | `8081` | Serves `/mcp`, `/media` (upload), `/media/<sha256>` (download) and `/healthz`. |
 | `DATA_DIR` | `/data` | The only writable volume; holds `session.db` (whatsmeow identity), `cache.db` (chat/message cache), and `media/` (attachment blobs, both downloaded and staged for sending). |
-| `AUTH_TOKEN` | *(unset)* | Bearer token required on every HTTP request, `/mcp` and `/media/` alike. Only the `/healthz` liveness probe is exempt. |
+| `AUTH_TOKEN` | *(unset)* | Bearer token required on every HTTP request, `/mcp` and `/media/` alike. Only the `/healthz` probe is exempt; it exposes a coarse status string and no identity. |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them is a fatal startup error — there is no TLS listener, so they only ever served plaintext. Terminate TLS in a reverse proxy. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error`. |
@@ -273,9 +273,20 @@ Pairing is driven exclusively through MCP. The former admin HTTP surface
 (`/admin/pair/start`, `/admin/unpair`, `/admin/events`, `/admin/status`)
 was removed; `make pair-qr` drives the MCP tools directly.
 
-`ping`, `pairing_start`, and `pairing_complete` are exempt from the
-`not_paired` gate; every other tool returns a structured `not_paired`
-error until pairing succeeds.
+`ping`, `pairing_start`, `pairing_complete` and `cache_sync_status` are
+exempt from the readiness gate; every other tool returns a structured
+error until the client is ready:
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `not_paired` | No device credentials on disk — never linked, or unlinked from the phone. | Run `pairing_start`. |
+| `not_connected` | Linked, but the socket is not currently authenticated. | Nothing; auto-reconnect retries. Just retry the call. |
+
+The two are deliberately distinct. Reporting a linked-but-offline client
+as `not_paired` would send callers to `pairing_start`, which refuses with
+`already_paired` because the device row is still on disk — a closed loop
+with no exit. `ping` reports both facts separately as `paired` and
+`connected`.
 
 Full pairing contract — events, error codes — is in
 [REQUIREMENTS.md §Pairing](REQUIREMENTS.md#pairing).
@@ -291,8 +302,15 @@ Full pairing contract — events, error codes — is in
 - **Read-only root filesystem compatible** — mount `/` as `ro`,
   `/data` and `/tmp` as `rw`.
 - **Healthcheck is built-in** — `whatsapp-mcp --healthcheck` probes the
-  unauthenticated `http://127.0.0.1:$PORT/healthz` liveness endpoint. No shell
-  or curl needed in the distroless image.
+  unauthenticated `http://127.0.0.1:$PORT/healthz` endpoint. No shell or curl
+  needed in the distroless image. The probe reflects WhatsApp state, not just
+  process liveness: `{"status":"ok"}` when paired and connected,
+  `{"status":"awaiting_pairing"}` (still 200 — a container waiting to be
+  linked is not faulty) when no device is on disk, and
+  `{"status":"disconnected"}` with **HTTP 503** when the device is linked but
+  the socket is down. That last state is why the probe is not a flat 200: a
+  container whose socket dies otherwise keeps reporting healthy while every
+  tool call fails.
 - **Media is a bounded store.** `$DATA_DIR/media` holds both attachments
   fetched by `download_media` and bytes staged via `POST /media`, capped by
   `MEDIA_MAX_BYTES` / `MEDIA_TTL` (and per-request by

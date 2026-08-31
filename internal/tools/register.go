@@ -105,19 +105,19 @@ func Register(reg *mcp.Registry, deps Deps) error {
 		},
 		{
 			Name:        "pairing_start",
-			Description: "Start a WhatsApp pair flow and return the first rotating QR payload. Pass `phone` to also obtain a phone-number linking code. Exempt from the not_paired gate.",
+			Description: "Start a WhatsApp pair flow and return the first rotating QR payload. Pass `phone` to also obtain a phone-number linking code. Exempt from the readiness gate (not_paired / not_connected).",
 			InputSchema: pairingStartSchema,
 			Handler:     pairingStart(deps),
 		},
 		{
 			Name:        "pairing_complete",
-			Description: "Poll an in-progress pair flow. Blocks up to wait_seconds (default 60, max 120) for a terminal event; wait_seconds=0 returns the latest cached event without blocking. Exempt from the not_paired gate.",
+			Description: "Poll an in-progress pair flow. Blocks up to wait_seconds (default 60, max 120) for a terminal event; wait_seconds=0 returns the latest cached event without blocking. Exempt from the readiness gate (not_paired / not_connected).",
 			InputSchema: pairingCompleteSchema,
 			Handler:     pairingComplete(deps),
 		},
 		{
 			Name:        "cache_sync_status",
-			Description: "Diagnostic snapshot of the local cache: chat / message / contact counts, the timestamp of the most recent ingested whatsmeow event, and the most recent (or in-progress) sync run. Exempt from the not_paired gate; safe to call before linking.",
+			Description: "Diagnostic snapshot of the local cache: chat / message / contact counts, the timestamp of the most recent ingested whatsmeow event, and the most recent (or in-progress) sync run. Exempt from the readiness gate; safe to call before linking and while disconnected.",
 			InputSchema: cacheSyncStatusSchema,
 			Handler:     cacheSyncStatus(deps),
 		},

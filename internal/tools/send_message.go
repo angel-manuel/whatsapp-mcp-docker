@@ -85,7 +85,7 @@ func sendMessage(deps Deps) mcp.Handler {
 		resp, err := deps.WA.SendMessage(ctx, to, msg)
 		if err != nil {
 			if errors.Is(err, wa.ErrNotLoggedIn) {
-				return mcp.NotPairedError(), nil
+				return mcp.NotConnectedError(), nil
 			}
 			return mcp.ErrorResult(mcp.ErrInternal, fmt.Sprintf("send message: %v", err)), nil
 		}

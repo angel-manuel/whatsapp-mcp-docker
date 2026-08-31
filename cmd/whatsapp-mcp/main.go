@@ -110,6 +110,12 @@ func run() error {
 // interface. The exit code drives the Docker HEALTHCHECK on distroless images
 // where no shell or curl is available. The port mirrors config.Load's PORT
 // handling (default 8081) so the probe tracks the server's bind port.
+//
+// /healthz reports WhatsApp readiness, not just process liveness, so this
+// exits non-zero when the device is linked but the socket is down — the
+// state that would otherwise leave a container reporting healthy while
+// every tool call fails. An unpaired container still passes: it is waiting
+// on a human, not broken.
 func runHealthcheck() error {
 	port := 8081
 	if v := os.Getenv("PORT"); v != "" {

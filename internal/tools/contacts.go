@@ -243,9 +243,11 @@ func getContactDetails(deps Deps) mcp.Handler {
 					details.IsOnWhatsApp = true
 				}
 			} else if errors.Is(err, wa.ErrNotLoggedIn) {
-				// Middleware would normally have caught this; surface as
-				// not_paired to keep the error taxonomy consistent.
-				return mcp.NotPairedError(), nil
+				// The socket died between the middleware's readiness check
+				// and this call. Surface as not_connected — the device is
+				// still linked, so not_paired would wrongly send the caller
+				// to pairing_start.
+				return mcp.NotConnectedError(), nil
 			}
 			// Only attempt phone-number registration check when we know a
 			// real phone number — hasPhone is false for an unaliased @lid,
@@ -260,7 +262,7 @@ func getContactDetails(deps Deps) mcp.Handler {
 						}
 					}
 				} else if errors.Is(err, wa.ErrNotLoggedIn) {
-					return mcp.NotPairedError(), nil
+					return mcp.NotConnectedError(), nil
 				}
 			}
 			if url, err := deps.WA.ProfilePictureURL(ctx, canonical); err == nil && url != "" {

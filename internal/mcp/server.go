@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -142,9 +143,11 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 // exemptFromPairingGate names the tools that must remain callable before
-// the device has been linked. ping is the health check (it is itself
-// designed to report paired:false); pairing_start and pairing_complete
-// drive the link flow and would be useless behind the not_paired gate.
+// the device has been linked — and, equally, while it is linked but the
+// socket is down. ping is the health check (it is itself designed to
+// report paired/connected false); pairing_start and pairing_complete drive
+// the link flow; cache_sync_status reports when the last event arrived,
+// which is exactly the diagnostic wanted during a disconnection.
 //
 // Exemption is by name rather than per-tool flag so the policy lives in
 // one transport-level place; tools authoring stays decoupled from it.
@@ -185,8 +188,8 @@ func (s *Server) HTTPHandler() http.Handler {
 // by the container HEALTHCHECK.
 //
 // /healthz is the sole exception to the bearer gate, and only because it
-// exposes nothing but a 200. Config.Routes entries carry data and are always
-// authenticated.
+// exposes nothing but a coarse status string. Config.Routes entries carry
+// data and are always authenticated.
 func (s *Server) newHTTPMux(streamable http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", bearerAuth(s.cfg.AuthToken, streamable))
@@ -196,21 +199,62 @@ func (s *Server) newHTTPMux(streamable http.Handler) *http.ServeMux {
 		}
 		mux.Handle(pattern, bearerAuth(s.cfg.AuthToken, h))
 	}
-	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/healthz", s.handleHealthz)
 	return mux
 }
 
-// handleHealthz is an unauthenticated liveness probe reporting that the HTTP
-// server is accepting connections and routing. It exposes no state beyond a
-// 200, so it is safe to leave outside the bearer-auth gate.
-func handleHealthz(w http.ResponseWriter, r *http.Request) {
+// Health status strings reported by /healthz. They are part of the
+// probe's contract — keep them stable.
+const (
+	// HealthOK means paired and connected: fully operational.
+	HealthOK = "ok"
+	// HealthAwaitingPairing means no device credentials exist yet. The
+	// process is working correctly and waiting on a human to scan a QR,
+	// so this is deliberately NOT a failure.
+	HealthAwaitingPairing = "awaiting_pairing"
+	// HealthDisconnected means the device is linked but the socket is
+	// not authenticated — the one state that is genuinely broken.
+	HealthDisconnected = "disconnected"
+)
+
+// handleHealthz reports whether the server is actually able to serve
+// WhatsApp traffic, not merely whether the process is up.
+//
+// It returns 503 for exactly one state: paired but disconnected. That is
+// the failure mode a flat "always 200" probe hides — a container whose
+// socket died can sit for days reporting healthy while every tool call
+// fails. An unpaired client still returns 200, because a fresh install
+// waiting to be linked is not faulty and must stay reachable for the
+// pairing tools; failing the probe there would leave a new container
+// permanently unhealthy with no way to fix it.
+//
+// The body carries only a coarse status string — never a JID, phone
+// number or push name — because this endpoint is the sole route outside
+// the bearer gate.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, "ok\n")
+
+	// New guarantees a non-nil gate, but this route must never panic:
+	// it is what the container HEALTHCHECK calls.
+	status := HealthOK
+	code := http.StatusOK
+	if s.pairing != nil {
+		switch {
+		case !s.pairing.IsPaired():
+			status = HealthAwaitingPairing
+		case !s.pairing.IsConnected():
+			status = HealthDisconnected
+			code = http.StatusServiceUnavailable
+		}
+	}
+
+	body, _ := json.Marshal(map[string]string{"status": status})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write(append(body, '\n'))
 }
 
 // ListenStdio runs the stdio transport against caller-supplied pipes.

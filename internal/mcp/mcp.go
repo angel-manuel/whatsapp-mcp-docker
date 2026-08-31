@@ -29,9 +29,20 @@ import (
 type ErrorCode string
 
 const (
-	// ErrNotPaired indicates whatsmeow is not paired/logged-in. Tool
-	// calls fail with this until the device has successfully paired.
+	// ErrNotPaired indicates no device credentials exist on disk: the
+	// device has never been linked, or was unlinked from the phone. Tool
+	// calls fail with this until pairing_start completes a pair flow.
+	//
+	// This is deliberately distinct from ErrNotConnected. Reporting a
+	// paired-but-offline client as not_paired sends callers to
+	// pairing_start, which refuses with already_paired because the device
+	// row is still on disk — a closed loop with no exit.
 	ErrNotPaired ErrorCode = "not_paired"
+	// ErrNotConnected indicates the device is linked but the whatsmeow
+	// socket is not currently authenticated, so anything touching the
+	// network would fail. Unlike ErrNotPaired this is transient and needs
+	// no user action: auto-reconnect retries in the background.
+	ErrNotConnected ErrorCode = "not_connected"
 	// ErrInvalidArgument indicates the caller supplied arguments that
 	// the tool refused to accept (empty JID, negative limit, ...).
 	ErrInvalidArgument ErrorCode = "invalid_argument"
@@ -65,18 +76,38 @@ const (
 // Keep this stable — clients MAY surface it directly.
 const NotPairedMessage = "WhatsApp client is not paired. Use the pairing_start MCP tool to pair the device."
 
-// PairingState reports whether whatsmeow is currently paired and logged
-// in. Implementations must be safe for concurrent use; they are called
-// on every tool invocation.
+// NotConnectedMessage is the stable message returned alongside
+// ErrNotConnected. Keep this stable — clients MAY surface it directly.
+// It deliberately does NOT point at pairing_start: the device is already
+// linked, so pairing is the wrong remedy.
+const NotConnectedMessage = "WhatsApp client is paired but not connected. The connection is retried automatically; retry shortly."
+
+// PairingState reports the two independent facts the tool gate needs.
+// Implementations must be safe for concurrent use; they are called on
+// every tool invocation.
+//
+// The two predicates are separate because they fail independently: a
+// device can be linked but offline (IsPaired true, IsConnected false),
+// which is a transient network condition rather than a missing link.
 type PairingState interface {
+	// IsPaired reports whether device credentials exist on disk.
 	IsPaired() bool
+	// IsConnected reports whether the socket is currently authenticated.
+	IsConnected() bool
 }
 
-// PairingStateFunc adapts a plain function to the PairingState interface.
+// PairingStateFunc adapts a plain function to the PairingState interface,
+// reporting the same value for both predicates. This is the degenerate
+// "paired iff connected" case, which is what tests and the AlwaysPaired /
+// NeverPaired stubs want; production wiring implements PairingState
+// directly so the two can differ.
 type PairingStateFunc func() bool
 
 // IsPaired implements PairingState.
 func (f PairingStateFunc) IsPaired() bool { return f() }
+
+// IsConnected implements PairingState.
+func (f PairingStateFunc) IsConnected() bool { return f() }
 
 // AlwaysPaired is a PairingState that reports the client as paired. It
 // is useful for tests where the whatsmeow layer is not running.
@@ -189,6 +220,12 @@ func NotPairedError() *mcpgo.CallToolResult {
 	return ErrorResult(ErrNotPaired, NotPairedMessage)
 }
 
+// NotConnectedError constructs the canonical structured tool error
+// returned when the device is linked but the socket is not live.
+func NotConnectedError() *mcpgo.CallToolResult {
+	return ErrorResult(ErrNotConnected, NotConnectedMessage)
+}
+
 // ErrorResult is the canonical shape for structured tool errors. Clients
 // are expected to branch on `code` (an ErrorCode) rather than on the free
 // text in `message`. Callers pass a non-empty ErrorCode and a human-
@@ -257,20 +294,32 @@ func MediaUnavailableError(message string) *mcpgo.CallToolResult {
 }
 
 // pairingMiddleware short-circuits every tool call with a structured
-// not_paired error when the pairing state reports false. Registered as
-// the outermost middleware so nothing downstream runs pre-pair.
+// error when the client is not ready. Registered as the outermost
+// middleware so nothing downstream runs pre-pair.
+//
+// The two checks are ordered: missing credentials (not_paired) is the
+// durable condition a caller must act on, and an unpaired client is
+// necessarily disconnected too, so it is reported first. Only once the
+// device is linked does a dead socket become the interesting failure
+// (not_connected).
 //
 // Tools whose names appear in exempt are passed through unconditionally;
 // this is how the pairing tools themselves (and the ping health check)
-// remain callable before the device has been linked.
+// remain callable before the device has been linked — and, equally,
+// while it is linked but offline.
 func pairingMiddleware(state PairingState, exempt map[string]struct{}) mcpserver.ToolHandlerMiddleware {
 	return func(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 		return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 			if _, ok := exempt[req.Params.Name]; ok {
 				return next(ctx, req)
 			}
-			if state != nil && !state.IsPaired() {
-				return NotPairedError(), nil
+			if state != nil {
+				if !state.IsPaired() {
+					return NotPairedError(), nil
+				}
+				if !state.IsConnected() {
+					return NotConnectedError(), nil
+				}
 			}
 			return next(ctx, req)
 		}

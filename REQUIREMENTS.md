@@ -150,7 +150,12 @@ These two tools target agents that authenticate through the same bearer-token MC
 - `pairing_start` — input `{ "phone"?: string }`. Without `phone`, opens a QR flow and returns `{ "status": "awaiting_scan", "code": "<raw QR>", "timeout_ms": <int> }`. With `phone`, also requests a phone linking code and returns `{ "status": "awaiting_phone_link", "linking_code": "ABCD-EFGH", "code": "<latest QR>", "timeout_ms": <int> }`. If the first QR has not been emitted within an internal timeout (rare; whatsmeow normally emits within ~1s), the QR-mode response degrades to `{ "status": "pending" }` and the caller should poll `pairing_complete` for the code. Errors: `already_paired`, `pair_in_progress`, `not_pairing` (only when `phone` is supplied — indicates the freshly-opened flow was already torn down by a concurrent unpair), `internal`.
 - `pairing_complete` — input `{ "wait_seconds"?: integer (0..120, default 60) }`. Polls the in-progress flow. `wait_seconds=0` returns the latest cached event without blocking (status snapshot). Otherwise blocks up to `wait_seconds`, coalescing rotation events and returning either a terminal status (`success`, `timeout`, `error`, `client_outdated`, `scanned_without_multidevice`) or `pending` carrying the newest rotation code. `not_pairing` indicates no flow is active. On `success`, the response also carries `jid` and `pushname` from `wa.Status()`.
 
-Until pairing succeeds, every MCP tool call MUST return a structured error with a stable code (`not_paired`), except for `ping`, `pairing_start`, and `pairing_complete` which remain callable pre-pair so agents can detect state and drive the link flow over MCP.
+Until the client is ready, every MCP tool call MUST return a structured error with a stable code, except for `ping`, `pairing_start`, `pairing_complete` and `cache_sync_status`, which remain callable so agents can detect state and drive the link flow over MCP. Two distinct codes are required:
+
+- `not_paired` — no device credentials on disk. The gate MUST derive this from the on-disk device store, the same predicate `pairing_start` uses to reject with `already_paired`. `pairing_start` is the remedy.
+- `not_connected` — the device is linked but the socket is not authenticated. Transient; auto-reconnect retries and the caller need only retry.
+
+Collapsing the two (gating on "logged in" alone) MUST NOT happen: it reports a linked-but-offline client as `not_paired`, which directs the caller to `pairing_start`, which then refuses with `already_paired` because the device row is still present — a closed loop with no exit.
 
 ## Session persistence
 
@@ -162,7 +167,7 @@ Until pairing succeeds, every MCP tool call MUST return a structured error with 
 
 The container MUST surface these events to the outside world (for external orchestrators that drive reconnect UI):
 
-- `logged_out` — WhatsApp unpaired the device (remote). Follow-on tool calls return `not_paired` until re-pair.
+- `logged_out` — WhatsApp unpaired the device (remote). Follow-on tool calls return `not_paired` once the device credentials are gone.
 - `stream_replaced` — another process connected with the same keys; this instance is toast.
 - `temporary_ban` — includes expire duration.
 - `connection_failure` — includes the whatsmeow reason code.
@@ -216,8 +221,9 @@ No long-lived secrets in env vars in production: operators should deliver `AUTH_
 ## Observability
 
 - Structured JSON logs to stdout; one event per line; includes `connection_id` (if passed via env) and a stable `event_type`.
-- `GET /healthz` — unauthenticated liveness probe (HTTP server up and routing); drives the container HEALTHCHECK via `whatsapp-mcp --healthcheck`.
-- `ping` (MCP tool) — readiness: liveness + pairing state. Exempt from the `not_paired` gate, so it answers before the device is linked.
+- `GET /healthz` — unauthenticated probe; drives the container HEALTHCHECK via `whatsapp-mcp --healthcheck`. It reports WhatsApp readiness, not merely that the HTTP server routes: `200 {"status":"ok"}` when paired and connected, `200 {"status":"awaiting_pairing"}` when unpaired (waiting on a human to scan is not a fault, and the endpoint must stay reachable for the pairing tools), `503 {"status":"disconnected"}` when paired but the socket is down. The body carries a coarse status string only — never a JID, phone number or push name — since this is the sole route outside the bearer gate.
+- `ping` (MCP tool) — readiness: liveness + `paired` and `connected` reported separately. Exempt from the readiness gate, so it answers before the device is linked and while it is offline.
+- whatsmeow's own logs MUST be routed into the application logger. Leaving them at `waLog.Noop` discards the entire connection lifecycle — reconnect attempts, connect failures, stream errors — which makes a socket that dies and never recovers impossible to diagnose after the fact.
 - `cache_sync_status` (MCP tool) — cache counts, last ingested event, current/most-recent sync run.
 - Prometheus exposition is not implemented yet.
 

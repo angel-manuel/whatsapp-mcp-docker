@@ -119,7 +119,7 @@ func sendReaction(deps Deps) mcp.Handler {
 		resp, err := deps.WA.SendMessage(ctx, chat, msg)
 		if err != nil {
 			if errors.Is(err, wa.ErrNotLoggedIn) {
-				return mcp.NotPairedError(), nil
+				return mcp.NotConnectedError(), nil
 			}
 			return mcp.ErrorResult(mcp.ErrInternal, fmt.Sprintf("send reaction: %v", err)), nil
 		}

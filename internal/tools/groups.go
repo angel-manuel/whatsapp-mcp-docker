@@ -73,7 +73,7 @@ func getGroupInfo(deps Deps) mcp.Handler {
 		case err == nil:
 			return toGroupInfoView(info), nil
 		case errors.Is(err, wa.ErrNotLoggedIn):
-			return mcp.NotPairedError(), nil
+			return mcp.NotConnectedError(), nil
 		case errors.Is(err, whatsmeow.ErrIQNotFound), errors.Is(err, whatsmeow.ErrGroupNotFound):
 			return mcp.ErrorResult(mcp.ErrNotFound, fmt.Sprintf("group %q not found", in.GroupJID)), nil
 		default:
