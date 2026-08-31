@@ -33,13 +33,13 @@ type fakeDownloader struct {
 	pathCalls int
 	urlCalls  int
 
-	lastDirectPath string
-	lastMediaType  whatsmeow.MediaType
-	lastMMSType    string
-	lastFileLength int
-	lastMediaKey   []byte
-	lastFileHash   []byte
-	lastEncHash    []byte
+	lastDirectPath  string
+	lastMediaType   whatsmeow.MediaType
+	lastMMSType     string
+	lastAllowNoHash bool
+	lastMediaKey    []byte
+	lastFileHash    []byte
+	lastEncHash     []byte
 }
 
 func (f *fakeDownloader) Download(_ context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error) {
@@ -51,17 +51,17 @@ func (f *fakeDownloader) Download(_ context.Context, msg whatsmeow.DownloadableM
 }
 
 func (f *fakeDownloader) DownloadMediaWithPath(_ context.Context, directPath string,
-	encFileHash, fileHash, mediaKey []byte, fileLength int,
-	mediaType whatsmeow.MediaType, mmsType string,
+	encFileHash, fileHash, mediaKey []byte,
+	mediaType whatsmeow.MediaType, mmsType string, allowNoHash bool,
 ) ([]byte, error) {
 	f.pathCalls++
 	f.lastDirectPath = directPath
 	f.lastEncHash = encFileHash
 	f.lastFileHash = fileHash
 	f.lastMediaKey = mediaKey
-	f.lastFileLength = fileLength
 	f.lastMediaType = mediaType
 	f.lastMMSType = mmsType
+	f.lastAllowNoHash = allowNoHash
 	return f.data, f.err
 }
 
@@ -155,8 +155,11 @@ func TestDownloadMedia_UsesDirectPathAndStoresContentAddressed(t *testing.T) {
 	if dl.lastMMSType != "" {
 		t.Errorf("mmsType = %q, want empty so whatsmeow derives it", dl.lastMMSType)
 	}
-	if dl.lastFileLength != len(payload) {
-		t.Errorf("fileLength = %d, want %d", dl.lastFileLength, len(payload))
+	// allowNoHash must stay true: whatsmeow substitutes a 32-byte zero hash
+	// for a nil fileHash when it is false, which would turn a cache row with
+	// no stored SHA256 into a guaranteed hash mismatch.
+	if !dl.lastAllowNoHash {
+		t.Error("allowNoHash = false, want true so a nil fileHash is passed through")
 	}
 
 	// Bytes on disk must match the digest the descriptor advertises.
@@ -419,32 +422,6 @@ func TestDownloadMedia_NotPairedIsGated(t *testing.T) {
 		"chat_jid": mediaChatJID, "message_id": "wamid.X",
 	})
 	expectError(t, res, mcp.ErrNotPaired)
-}
-
-// TestDownloadMedia_ToleratesFileLengthWarning covers acceptWarnings' accept
-// branch. whatsmeow returns the decrypted bytes *and* ErrFileLengthMismatch
-// when the advertised length disagrees with what arrived — routine for voice
-// notes, and harmless because the plaintext SHA-256 is still verified.
-// Treating it as fatal would break audio downloads outright.
-func TestDownloadMedia_ToleratesFileLengthWarning(t *testing.T) {
-	payload := []byte("voice note bytes")
-	dl := &fakeDownloader{data: payload, err: whatsmeow.ErrFileLengthMismatch}
-	h := newHarnessWithDeps(t, true,
-		seedMedia("wamid.VN", cache.KindAudio, "audio/ogg; codecs=opus", "", "", "/v/t62/aud", payload),
-		nil,
-		func(d *tools.Deps) { d.Downloader = dl })
-
-	res := callTool(t, h, "download_media", map[string]any{
-		"chat_jid": mediaChatJID, "message_id": "wamid.VN",
-	})
-	if res.IsError {
-		t.Fatalf("length warning treated as fatal: %+v", structured(t, res))
-	}
-	out := structured(t, res)
-	sum := sha256.Sum256(payload)
-	if got := out["sha256"]; got != hex.EncodeToString(sum[:]) {
-		t.Errorf("sha256 = %v", got)
-	}
 }
 
 // TestDownloadMedia_IntegrityFailureIsNotTolerated is the other side of
