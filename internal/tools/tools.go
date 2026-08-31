@@ -93,7 +93,7 @@ type MediaDownloader interface {
 	// preferring a non-web.whatsapp.net URL, then the direct path.
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	// DownloadMediaWithPath fetches by direct path, which outlives the URL.
-	DownloadMediaWithPath(ctx context.Context, directPath string, encFileHash, fileHash, mediaKey []byte, fileLength int, mediaType whatsmeow.MediaType, mmsType string) ([]byte, error)
+	DownloadMediaWithPath(ctx context.Context, directPath string, encFileHash, fileHash, mediaKey []byte, mediaType whatsmeow.MediaType, mmsType string, allowNoHash bool) ([]byte, error)
 }
 
 // MediaUploader is the narrow whatsmeow upload surface used by the media

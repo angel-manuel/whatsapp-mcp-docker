@@ -182,9 +182,15 @@ func fetchMedia(ctx context.Context, dl MediaDownloader, row cache.MediaRow) ([]
 
 	if row.DirectPath != "" {
 		// mmsType empty: DownloadMediaWithPath derives it from mediaType.
+		// allowNoHash=true keeps the pre-bump behaviour: whatsmeow now
+		// substitutes a 32-byte zero hash when fileHash is nil, which would
+		// turn a cache row with no stored SHA256 into a guaranteed hash
+		// mismatch. Passing the nil through preserves the old semantics.
+		// (row.Length is gone: upstream dropped the length argument and the
+		// ErrFileLengthMismatch retry that consumed it.)
 		data, err := dl.DownloadMediaWithPath(ctx, row.DirectPath,
-			row.EncSHA256, row.SHA256, row.Key, int(row.Length), mediaType, "")
-		if data, err = acceptWarnings(data, err); err != nil {
+			row.EncSHA256, row.SHA256, row.Key, mediaType, "", true)
+		if err != nil {
 			return nil, fmt.Errorf("download by direct path failed: %w", err)
 		}
 		return data, nil
@@ -195,22 +201,10 @@ func fetchMedia(ctx context.Context, dl MediaDownloader, row cache.MediaRow) ([]
 	}
 
 	data, err := dl.Download(ctx, downloadableFor(row))
-	if data, err = acceptWarnings(data, err); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("download by url failed: %w; %s", err, staleLocatorHint)
 	}
 	return data, nil
-}
-
-// acceptWarnings filters whatsmeow's non-fatal download warnings. With
-// ReturnDownloadWarnings on (the default) whatsmeow returns the decrypted
-// bytes *and* an error when the advertised file length disagrees with what
-// arrived — common for voice notes and harmless, since the plaintext SHA-256
-// is still verified. Integrity failures are not filtered.
-func acceptWarnings(data []byte, err error) ([]byte, error) {
-	if err != nil && len(data) > 0 && errors.Is(err, whatsmeow.ErrFileLengthMismatch) {
-		return data, nil
-	}
-	return data, err
 }
 
 // mediaTypeForKind maps a cached message kind onto the whatsmeow media type

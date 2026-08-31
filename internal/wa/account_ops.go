@@ -22,7 +22,12 @@ func (c *Client) SetStatusMessage(ctx context.Context, msg string) error {
 	if wm == nil || !wm.IsLoggedIn() {
 		return ErrNotLoggedIn
 	}
-	return wm.SetStatusMessage(ctx, msg)
+	// whatsmeow widened this to a struct carrying an optional emoji and an
+	// ephemeral duration. Neither is part of this wrapper's contract — it
+	// sets the persistent About text — so only Text is populated and the
+	// zero Duration keeps the text permanent, matching the previous
+	// plain-string call.
+	return wm.SetStatusMessage(ctx, types.SetStatusInput{Text: &msg})
 }
 
 // SendPresence publishes the account's global availability

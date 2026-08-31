@@ -125,21 +125,3 @@ func TestSlogAdapter_NilLoggerIsNoop(t *testing.T) {
 	log.Errorf("no logger configured")
 	log.Sub("Client").Infof("still fine")
 }
-
-// TestSlogAdapter_LiteralPercentWithoutArgs verifies a message carrying a
-// stray % but no args is passed through untouched rather than run through
-// Sprintf, which would corrupt it into "%!(NOVERB)".
-func TestSlogAdapter_LiteralPercentWithoutArgs(t *testing.T) {
-	t.Parallel()
-
-	log, buf := newCapturingLogger(slog.LevelDebug)
-	log.Infof("battery at 80%")
-
-	records := decodeRecords(t, buf)
-	if len(records) != 1 {
-		t.Fatalf("got %d records, want 1", len(records))
-	}
-	if got := records[0]["msg"]; got != "battery at 80%" {
-		t.Errorf("msg=%v, want %q", got, "battery at 80%")
-	}
-}

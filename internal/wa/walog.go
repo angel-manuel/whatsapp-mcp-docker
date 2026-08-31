@@ -55,6 +55,9 @@ func (a slogAdapter) logf(level slog.Level, msg string, args ...any) {
 	if !a.l.Enabled(ctx, level) {
 		return
 	}
+	// Only run Sprintf when there is something to substitute. whatsmeow logs
+	// plenty of argument-free strings containing a literal % (percentages,
+	// encoded paths); Sprintf would rewrite those into "...%!(NOVERB)".
 	rendered := msg
 	if len(args) > 0 {
 		rendered = fmt.Sprintf(msg, args...)

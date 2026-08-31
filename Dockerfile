@@ -4,8 +4,8 @@
 # Pinned by digest for reproducible builds. To bump: resolve the current digest
 # of the target tag (docker manifest inspect / registry HEAD) and update both
 # the tag hint (after the digest, for humans) and the digest itself.
-ARG GO_VERSION=1.25
-FROM golang:${GO_VERSION}-bookworm@sha256:1a1408bf8d2d3077f9508880caf0e8bb0fde195fe3c890e7ea480dfb66dc7827 AS builder
+ARG GO_VERSION=1.26
+FROM golang:${GO_VERSION}-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS builder
 
 WORKDIR /src
 
