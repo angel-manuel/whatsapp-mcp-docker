@@ -1,0 +1,27 @@
+# osv-scanner configuration. CI scans go.mod with it in the `osv-scan` job
+# of .github/workflows/deps-audit.yml, on every PR that changes the
+# dependency set and daily against master.
+#
+# Ignores need a `reason` saying why the advisory does not apply to us (or
+# why no fix can be taken yet), and an `ignoreUntil` no more than 90 days
+# out. Past that date the entry stops suppressing and the scan fails again,
+# forcing a re-triage. An advisory govulncheck also reports needs no entry
+# here unless osv-scanner fails on it too — govulncheck has no ignore list,
+# but only reports code paths we actually call.
+#
+# Example:
+#
+#   [[IgnoredVulns]]
+#   id = "GO-2026-0000"
+#   ignoreUntil = 2027-01-31
+#   reason = "Only reachable through X, which we never call. No fixed release."
+
+[[IgnoredVulns]]
+id = "GO-2026-6911"
+ignoreUntil = 2027-02-07
+reason = "mcp-go client/transport (StreamableHTTP redirect SSRF). We ship only the mcp-go server; the client package is imported by tests alone, against a local test server. No fixed release yet."
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+ignoreUntil = 2027-02-07
+reason = "x/crypto/openpgp is deprecated by design; nothing in the module graph imports it (govulncheck: not reachable). The 'fix' is an untagged x/crypto pseudo-version; drop this when a tagged release carries it."

@@ -1,0 +1,8 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/angel-manuel/whatsapp-mcp-docker/.github/vex/whatsapp-mcp.vex.json",
+  "author": "whatsapp-mcp maintainers",
+  "timestamp": "2026-11-09T00:00:00Z",
+  "version": 1,
+  "statements": []
+}

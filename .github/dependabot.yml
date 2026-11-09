@@ -1,7 +1,8 @@
 # Dependabot configuration.
 #
 # Policy: nothing lands until it has been public for a week, except
-# whatsmeow, which lands as soon as it appears.
+# whatsmeow and the crypto modules (see the gomod entry), which land as
+# soon as they appear.
 #
 # The asymmetry is deliberate and was paid for. whatsmeow hardcodes the
 # WhatsApp client version it presents during the handshake; when WhatsApp
@@ -31,22 +32,57 @@ updates:
     commit-message:
       prefix: "fix"
       include: "scope"
+    # Crypto modules skip the cooldown and are updated even when transitive.
+    # They carry the Signal protocol and TLS for every WhatsApp connection,
+    # and their fixes often ship without a scored advisory, so a security
+    # update alone would never propose them. All of them are `// indirect` in
+    # go.mod, and the default `allow` is direct-only — without the
+    # `dependency-type: "all"` entries they would never be bumped at all.
+    # Keep the patterns identical in `allow`, `cooldown.exclude` and the
+    # `crypto` group (and its exclusion from `go-dependencies`).
+    allow:
+      - dependency-type: "direct"
+      - dependency-name: "golang.org/x/crypto"
+        dependency-type: "all"
+      - dependency-name: "golang.org/x/net"
+        dependency-type: "all"
+      - dependency-name: "filippo.io/edwards25519"
+        dependency-type: "all"
+      - dependency-name: "go.mau.fi/libsignal"
+        dependency-type: "all"
     cooldown:
       default-days: 7
       exclude:
         # See the header. Connectivity depends on this being current.
         - "go.mau.fi/whatsmeow"
+        - "golang.org/x/crypto"
+        - "golang.org/x/net"
+        - "filippo.io/edwards25519"
+        - "go.mau.fi/libsignal"
     groups:
+      # A dependency joins the first group it matches, so these come before
+      # the catch-all.
+      #
       # Kept out of the batch so it is never held back by an unrelated
       # dependency's cooldown, and so its PR is reviewable on its own.
       whatsmeow:
         patterns:
           - "go.mau.fi/whatsmeow"
+      crypto:
+        patterns:
+          - "golang.org/x/crypto"
+          - "golang.org/x/net"
+          - "filippo.io/edwards25519"
+          - "go.mau.fi/libsignal"
       go-dependencies:
         patterns:
           - "*"
         exclude-patterns:
           - "go.mau.fi/whatsmeow"
+          - "golang.org/x/crypto"
+          - "golang.org/x/net"
+          - "filippo.io/edwards25519"
+          - "go.mau.fi/libsignal"
 
   # Base images. The runtime bases (distroless, debian-slim) ship to users,
   # so a CVE fix in them has to be released — hence fix(deps), same as Go
@@ -58,7 +94,9 @@ updates:
   # The builder image tag is written inline rather than via an ARG for this
   # reason: Dependabot's tag grammar ([\w][\w.-]*) cannot parse a ${...}
   # interpolation, and an ARG-built tag is skipped without any diagnostic.
-  # Review golang bumps against the `go` directive in go.mod before merging.
+  # Review golang bumps against the `go` directive in go.mod before merging,
+  # and move go.mod's `toolchain` line to the new patch release in the same
+  # PR (see the comment above the builder FROM in Dockerfile).
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -77,6 +115,10 @@ updates:
   # Workflow actions. CI-only: they never reach the published image, so
   # these use the `ci` type, which release-please keeps out of the
   # changelog and which does not cut a release.
+  #
+  # Every `uses:` is pinned to a full commit SHA with the version in a
+  # trailing comment (`@<sha> # vX.Y.Z`): a tag can be moved to malicious
+  # code, a SHA cannot. Dependabot rewrites both the SHA and the comment.
   #
   # Note this covers `uses:` refs only. The golangci-lint *binary* version
   # is passed as a `with: version:` input and is invisible to Dependabot;
