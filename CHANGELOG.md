@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.7.4...v0.8.0) (2026-11-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* existing cache.db files from the old migration system are dropped and rebuilt empty on first start (the cache re-syncs from WhatsApp).
+
+### Features
+
+* optional Postgres backend via DATABASE_URL ([ae1aac0](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/ae1aac0585b58449f017c194125e041f40140829))
+* optional Postgres backend via DATABASE_URL ([c7a8321](https://github.com/angel-manuel/whatsapp-mcp-docker/commit/c7a8321183e733dd0a0a0abb630413f89e0a62fe))
+
 ## [0.7.4](https://github.com/angel-manuel/whatsapp-mcp-docker/compare/v0.7.3...v0.7.4) (2026-11-09)
 
 
