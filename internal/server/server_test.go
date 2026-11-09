@@ -140,7 +140,10 @@ func TestRun_LogsStartAndStopEvents(t *testing.T) {
 	cancel()
 
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v after cancel, want nil", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
