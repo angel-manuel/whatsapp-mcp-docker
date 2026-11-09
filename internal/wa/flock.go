@@ -44,3 +44,26 @@ func (l *lockfile) release() error {
 	}
 	return cerr
 }
+
+// Lock is an exclusive advisory lock on a file, held until Release.
+type Lock struct{ l *lockfile }
+
+// AcquireLock takes the same exclusive, non-blocking flock that Open takes
+// on {DataDir}/.lock, for callers guarding a directory above any single
+// Client (the multi-session data root). It fails with ErrLockHeld when
+// another process holds it.
+func AcquireLock(path string) (*Lock, error) {
+	l, err := acquireLock(path)
+	if err != nil {
+		return nil, err
+	}
+	return &Lock{l: l}, nil
+}
+
+// Release drops the lock. Safe to call on a nil Lock.
+func (l *Lock) Release() error {
+	if l == nil {
+		return nil
+	}
+	return l.l.release()
+}

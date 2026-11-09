@@ -28,11 +28,6 @@ func newTestServer(t *testing.T, transport TransportMode, pairing PairingState) 
 		Name:      "whatsapp-mcp-test",
 		Version:   "test",
 	}
-	if transport == TransportHTTP {
-		cfg.AuthToken = "testtoken"
-		cfg.BindAddr = "127.0.0.1"
-		cfg.Port = 65000 // only used if Run is called; tests go through HTTPHandler
-	}
 	srv, err := New(cfg, newTestLogger(), nil, pairing)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -82,11 +77,6 @@ func TestServer_NewValidatesConfig(t *testing.T) {
 		cfg     Config
 		wantErr string
 	}{
-		{
-			name:    "http without auth token",
-			cfg:     Config{Transport: TransportHTTP, Name: "x", Port: 1},
-			wantErr: "AuthToken",
-		},
 		{
 			name:    "unknown transport",
 			cfg:     Config{Transport: TransportMode("foo"), Name: "x"},
@@ -272,20 +262,17 @@ func TestStdio_PingExemptFromPairingGate(t *testing.T) {
 	}
 }
 
-// TestHTTP_ValidBearerSucceeds exercises a full initialize+call over
-// the HTTP/SSE transport with a matching bearer token.
-func TestHTTP_ValidBearerSucceeds(t *testing.T) {
+// TestHTTP_PingRoundtrip exercises a full initialize+call over the
+// streamable-HTTP transport. Authentication is the caller's job (see
+// internal/server), so the bare handler takes no credential.
+func TestHTTP_PingRoundtrip(t *testing.T) {
 	t.Parallel()
 
 	srv := newTestServer(t, TransportHTTP, AlwaysPaired)
 	ts := httptest.NewServer(srv.HTTPHandler())
 	defer ts.Close()
 
-	client, err := mcpclient.NewStreamableHttpClient(ts.URL+"/mcp",
-		mcpclienttransport.WithHTTPHeaders(map[string]string{
-			"Authorization": "Bearer testtoken",
-		}),
-	)
+	client, err := mcpclient.NewStreamableHttpClient(ts.URL + "/mcp")
 	if err != nil {
 		t.Fatalf("NewStreamableHttpClient: %v", err)
 	}
@@ -315,105 +302,6 @@ func TestHTTP_ValidBearerSucceeds(t *testing.T) {
 	}
 }
 
-// TestHTTP_MissingBearerRejected verifies requests without the bearer
-// header are rejected with 401 before reaching the MCP handler.
-func TestHTTP_MissingBearerRejected(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestServer(t, TransportHTTP, AlwaysPaired)
-	ts := httptest.NewServer(srv.HTTPHandler())
-	defer ts.Close()
-
-	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/mcp", body)
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status=%d, want %d", resp.StatusCode, http.StatusUnauthorized)
-	}
-	if got := resp.Header.Get("WWW-Authenticate"); got == "" {
-		t.Errorf("missing WWW-Authenticate header on 401")
-	}
-}
-
-// TestHTTP_HealthzUnauthenticated verifies /healthz returns 200 without a
-// bearer token, so the container HEALTHCHECK can probe it on distroless
-// images. The endpoint sits outside the bearer-auth gate by design.
-func TestHTTP_HealthzUnauthenticated(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestServer(t, TransportHTTP, AlwaysPaired)
-	ts := httptest.NewServer(srv.HTTPHandler())
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/healthz")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d, want %d", resp.StatusCode, http.StatusOK)
-	}
-}
-
-// TestHTTP_HealthzRejectsNonGet verifies the probe endpoint refuses methods
-// other than GET/HEAD with 405 rather than silently accepting them.
-func TestHTTP_HealthzRejectsNonGet(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestServer(t, TransportHTTP, AlwaysPaired)
-	ts := httptest.NewServer(srv.HTTPHandler())
-	defer ts.Close()
-
-	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/healthz", nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("status=%d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
-	}
-}
-
-// TestHTTP_WrongBearerRejected verifies a bearer token that does not
-// match the configured one is rejected with 401.
-func TestHTTP_WrongBearerRejected(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestServer(t, TransportHTTP, AlwaysPaired)
-	ts := httptest.NewServer(srv.HTTPHandler())
-	defer ts.Close()
-
-	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", body)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer not-the-right-token")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status=%d, want %d", resp.StatusCode, http.StatusUnauthorized)
-	}
-}
-
 // TestHTTP_NotPairedShortCircuits verifies the not_paired pre-handler
 // still runs over HTTP. The call is authenticated but the pairing
 // state reports disconnected. ping is exempt, so the test uses a
@@ -426,11 +314,7 @@ func TestHTTP_NotPairedShortCircuits(t *testing.T) {
 	ts := httptest.NewServer(srv.HTTPHandler())
 	defer ts.Close()
 
-	client, err := mcpclient.NewStreamableHttpClient(ts.URL+"/mcp",
-		mcpclienttransport.WithHTTPHeaders(map[string]string{
-			"Authorization": "Bearer testtoken",
-		}),
-	)
+	client, err := mcpclient.NewStreamableHttpClient(ts.URL + "/mcp")
 	if err != nil {
 		t.Fatalf("NewStreamableHttpClient: %v", err)
 	}
@@ -517,26 +401,21 @@ func (writeCloser) Close() error { return nil }
 
 type readCloser struct{ io.ReadCloser }
 
-// TestHTTP_ExtraRoutesShareTheBearerGate pins the property that makes it
-// safe to hang the media byte route off this listener: Config.Routes
-// entries get the same 401 treatment as /mcp, on the same port, from the
-// same AUTH_TOKEN. A route that bypassed the gate would be an
-// unauthenticated data-exfiltration path.
-func TestHTTP_ExtraRoutesShareTheBearerGate(t *testing.T) {
+// TestHTTP_ExtraRoutesMounted pins that Config.Routes entries are served
+// on the same mux as /mcp (so they inherit whatever gate the caller wraps
+// the handler in), that ServeMux wildcards reach the handler, and that a
+// nil handler is skipped rather than panicking the mux.
+func TestHTTP_ExtraRoutesMounted(t *testing.T) {
 	t.Parallel()
 
 	cfg := Config{
 		Transport: TransportHTTP,
 		Name:      "whatsapp-mcp-test",
 		Version:   "test",
-		AuthToken: "testtoken",
-		BindAddr:  "127.0.0.1",
-		Port:      65000,
 		Routes: map[string]http.Handler{
 			"/media/{sha256}": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte("digest:" + r.PathValue("sha256")))
 			}),
-			// A nil handler must be skipped rather than panicking the mux.
 			"/nil-route": nil,
 		},
 	}
@@ -548,89 +427,19 @@ func TestHTTP_ExtraRoutesShareTheBearerGate(t *testing.T) {
 	defer ts.Close()
 
 	digest := strings.Repeat("ab", 32)
-
-	unauth, err := http.Get(ts.URL + "/media/" + digest)
+	resp, err := http.Get(ts.URL + "/media/" + digest)
 	if err != nil {
-		t.Fatalf("Get without bearer: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
-	defer unauth.Body.Close()
-	if unauth.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status without bearer = %d, want 401", unauth.StatusCode)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-
-	req, err := http.NewRequest(http.MethodGet, ts.URL+"/media/"+digest, nil)
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer testtoken")
-	authed, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Get with bearer: %v", err)
-	}
-	defer authed.Body.Close()
-	if authed.StatusCode != http.StatusOK {
-		t.Fatalf("status with bearer = %d, want 200", authed.StatusCode)
-	}
-	body, err := io.ReadAll(authed.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
 	if string(body) != "digest:"+digest {
 		t.Fatalf("body = %q, want the {sha256} wildcard to reach the handler", body)
-	}
-}
-
-// TestBearerAuth_EmptyTokenRejectsEverything pins the middleware's behaviour
-// when it is handed no token at all. subtle.ConstantTimeCompare("", "") returns
-// 1, so the naive comparison would treat "Authorization: Bearer " — header
-// present, value empty — as a valid credential, turning a misconfiguration into
-// an open door on /mcp and the media byte route.
-//
-// Config.validate refuses to build an HTTP Server with an empty AuthToken, so
-// this state is unreachable through New; the test drives bearerAuth directly
-// because the middleware must be safe on its own, not merely well-guarded.
-func TestBearerAuth_EmptyTokenRejectsEverything(t *testing.T) {
-	t.Parallel()
-
-	var reached bool
-	ts := httptest.NewServer(bearerAuth("", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		reached = true
-		w.WriteHeader(http.StatusOK)
-	})))
-	defer ts.Close()
-
-	cases := []struct {
-		name   string
-		header string
-		set    bool
-	}{
-		{"no header", "", false},
-		{"empty bearer", "Bearer ", true},
-		{"bare prefix", "Bearer", true},
-		{"some token", "Bearer anything", true},
-		{"empty value", "", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodGet, ts.URL+"/mcp", nil)
-			if err != nil {
-				t.Fatalf("NewRequest: %v", err)
-			}
-			if tc.set {
-				req.Header.Set("Authorization", tc.header)
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("Do: %v", err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", resp.StatusCode)
-			}
-		})
-	}
-
-	if reached {
-		t.Error("wrapped handler ran; an empty token must gate every request")
 	}
 }

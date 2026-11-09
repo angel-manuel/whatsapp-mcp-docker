@@ -32,30 +32,46 @@ Both variants are multi-arch: `linux/amd64`, `linux/arm64`.
 
 ## Quick start
 
+One container hosts many WhatsApp sessions — one per linked phone, each
+with its own bearer token, identity, cache and media.
+
 ### 1. Run the container
 
 ```bash
 mkdir -p ~/whatsapp-mcp
-( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/.auth_token )
+( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/.admin_token )
 
 docker run -d \
   --name whatsapp-mcp \
   --restart unless-stopped \
   -p 8081:8081 \
   -v whatsapp-mcp-data:/data \
-  -e AUTH_TOKEN="$(cat ~/whatsapp-mcp/.auth_token)" \
+  -e ADMIN_TOKEN="$(cat ~/whatsapp-mcp/.admin_token)" \
   docker.io/angelmanuel/whatsapp-mcp:latest
 ```
 
-- `8081` — MCP HTTP transport (this is what your agent connects to).
-- `/data` — the only writable volume; holds `session.db` and
-  `cache.db`. Preserve it across restarts to keep the paired session.
+- `8081` — MCP HTTP transport, media byte routes and the `/sessions` admin API.
+- `/data` — the only writable volume; holds `sessions.db` and one
+  `sessions/<id>/` directory per session. Preserve it across restarts to
+  keep paired sessions.
 
-### 2. Configure the MCP in Claude Code
+### 2. Create a session
+
+```bash
+curl -s -X POST http://localhost:8081/sessions \
+  -H "Authorization: Bearer $(cat ~/whatsapp-mcp/.admin_token)" \
+  -d '{"id":"me"}'
+# {"id":"me","token":"<session token>","adopted":false}
+```
+
+The token is shown once; the server stores only its hash. `GET /sessions`
+lists sessions and their status; `DELETE /sessions/{id}` unlinks and wipes one.
+
+### 3. Configure the MCP in Claude Code
 
 ```bash
 claude mcp add --transport http whatsapp http://localhost:8081/mcp \
-  --header "Authorization: Bearer $(cat ~/whatsapp-mcp/.auth_token)" \
+  --header "Authorization: Bearer <session token>" \
   --scope user
 ```
 
@@ -72,6 +88,9 @@ For project-scoped wiring (committed alongside a repo), use
 token — the `Bearer ${WHATSAPP_MCP_AUTH_TOKEN}` form works once you
 export the variable in the shell that launches Claude Code.
 
+> **Upgrading from 0.7?** `AUTH_TOKEN` is gone and the `/data` layout
+> moved; see "Upgrading from 0.7" in the GitHub README. No re-pairing needed.
+
 > **Claude Desktop** only speaks **stdio** MCP, not HTTP. Run the
 > container with `-e TRANSPORT=stdio` and wrap it with a stdio bridge,
 > or use Claude Code (which speaks HTTP natively).
@@ -80,21 +99,23 @@ export the variable in the shell that launches Claude Code.
 
 | Var | Default | Notes |
 |---|---|---|
-| `TRANSPORT` | `http` | `http` or `stdio`. HTTP **requires** `AUTH_TOKEN`. |
-| `PORT` | `8081` | Serves `/mcp` **and** the media byte routes (`POST /media`, `GET /media/<sha256>`). |
-| `DATA_DIR` | `/data` | Persistent state directory (`session.db`, `cache.db`, `media/`). |
-| `AUTH_TOKEN` | *(unset)* | Bearer token required on every HTTP request (`/mcp` and `/media/`). |
+| `TRANSPORT` | `http` | `http` (many sessions, admin API) or `stdio` (one session, `STDIO_SESSION`). |
+| `PORT` | `8081` | Serves `/mcp`, the media byte routes (`POST /media`, `GET /media/<sha256>`), `/sessions` and `/healthz`. |
+| `DATA_DIR` | `/data` | Persistent state: `sessions.db` (ids → token hashes) and `sessions/<id>/` (`session.db`, `cache.db`, `media/`). |
+| `ADMIN_TOKEN` | *(unset)* | Bearer token for `/sessions`. **Unset leaves the admin API anonymous** — restrict it at the ingress. |
+| `MAX_SESSIONS` | `20` | Cap on hosted sessions. |
+| `STDIO_SESSION` | `default` | The one session served in stdio mode. |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them is a fatal startup error — there is no TLS listener. Terminate TLS in a reverse proxy. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
 | `LOG_FORMAT` | `json` | `json` or `text`. |
-| `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`; least-recently-requested evicted first. `0` = unlimited. |
+| `MEDIA_MAX_BYTES` | `1073741824` | Cap on each session's `media/`; least-recently-requested evicted first. `0` = unlimited. |
 | `MEDIA_TTL` | *(unset)* | Go duration (e.g. `168h`); evicts older media. Unset = disabled. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period; also runs at startup. |
 | `MEDIA_MAX_UPLOAD_BYTES` | `104857600` | Largest single `POST /media` body; over it the request is refused with `413`. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | Where `send_audio_message` looks for ffmpeg to transcode non-Opus audio. Present in `-slim`, absent in the distroless image (where non-Opus audio is refused). |
 
-In production, deliver `AUTH_TOKEN` as a tmpfs-mounted file referenced by
+In production, deliver `ADMIN_TOKEN` as a tmpfs-mounted file referenced by
 path, not via `-e` — `-e` exposes the secret to anyone who can read
 `/proc/<pid>/environ`.
 

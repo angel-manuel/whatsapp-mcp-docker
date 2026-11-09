@@ -83,6 +83,11 @@ type SyncOrchestrator struct {
 	store    *Store
 	ingestor *Ingestor
 	logger   *slog.Logger
+	// baseCtx scopes every sync run. It is deliberately not the caller's
+	// request context (a fast HTTP timeout must not abort mid-sync), but it
+	// is the owning session's lifetime, so deleting a session or shutting
+	// the process down stops an in-flight sync. Defaults to Background.
+	baseCtx context.Context
 
 	mu      sync.Mutex
 	running bool
@@ -96,14 +101,22 @@ func NewSyncOrchestrator(store *Store, ingestor *Ingestor, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &SyncOrchestrator{store: store, ingestor: ingestor, logger: logger}
+	return &SyncOrchestrator{store: store, ingestor: ingestor, logger: logger, baseCtx: context.Background()}
+}
+
+// WithBaseContext scopes every future sync run to ctx and returns o. Call
+// it before the first Start.
+func (o *SyncOrchestrator) WithBaseContext(ctx context.Context) *SyncOrchestrator {
+	o.baseCtx = ctx
+	return o
 }
 
 // Start kicks off a new sync. If a sync is already running, the
 // in-progress report is returned with started=false (idempotent).
 // Otherwise a fresh report is initialised, the goroutine spawned, and
-// (initialReport, true) returned. The goroutine uses context.Background()
-// so a fast HTTP request timeout cannot abort mid-sync.
+// (initialReport, true) returned. The goroutine runs on the base context
+// (see WithBaseContext), never the caller's, so a fast HTTP request timeout
+// cannot abort mid-sync.
 func (o *SyncOrchestrator) Start(wa SyncWAClient) (SyncReport, bool, error) {
 	o.mu.Lock()
 	if o.running {
@@ -144,7 +157,7 @@ func (o *SyncOrchestrator) Snapshot() SyncReport {
 // policy chosen by the user). After all stages: top-level Status is
 // done if every stage is done, else failed with a summary error.
 func (o *SyncOrchestrator) run(wa SyncWAClient) {
-	ctx := context.Background()
+	ctx := o.baseCtx
 	o.runStage(ctx, 0, func(s *Stage) error { return o.runGroups(ctx, wa, s) })
 	o.runStage(ctx, 1, func(s *Stage) error { return o.runNewsletters(ctx, wa, s) })
 	o.runStage(ctx, 2, func(s *Stage) error { return o.runAppState(ctx, wa, s) })

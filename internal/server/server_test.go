@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,12 +76,14 @@ func pickPort(t *testing.T) int {
 func newTestServer(t *testing.T, w io.Writer) *Server {
 	t.Helper()
 	cfg := &config.Config{
-		Transport: config.TransportStdio,
-		BindAddr:  "127.0.0.1",
-		Port:      pickPort(t),
-		DataDir:   t.TempDir(),
-		LogLevel:  "info",
-		LogFormat: "json",
+		Transport:    config.TransportStdio,
+		BindAddr:     "127.0.0.1",
+		Port:         pickPort(t),
+		DataDir:      t.TempDir(),
+		LogLevel:     "info",
+		LogFormat:    "json",
+		StdioSession: "default",
+		MaxSessions:  1,
 	}
 	logger := slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	return New(cfg, logger)
@@ -151,5 +155,70 @@ func TestRun_LogsStartAndStopEvents(t *testing.T) {
 	}
 	if !strings.Contains(out, "event_type=server.stop") {
 		t.Errorf("missing stop event in log output: %q", out)
+	}
+}
+
+// Two processes must never share a data root: the registry and the
+// sessions/ tree are shared state, and each session's own lock only
+// covers its own directory.
+func TestRun_HTTPRefusesSecondProcessOnSameDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	mk := func(port int) *Server {
+		return New(&config.Config{
+			Transport:   config.TransportHTTP,
+			BindAddr:    "127.0.0.1",
+			Port:        port,
+			DataDir:     dataDir,
+			MaxSessions: 1,
+		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}
+
+	port := pickPort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- mk(port).Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	// Wait until the first server is serving, i.e. holds the lock.
+	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := http.Get(url)
+		if err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("first server never came up: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	err := mk(pickPort(t)).Run(ctx2)
+	if err == nil || !strings.Contains(err.Error(), "lock") {
+		t.Fatalf("second Run: err = %v, want a lock error", err)
+	}
+}
+
+// A 0.7 volume is never served silently: startup must say how to migrate.
+func TestRun_WarnsAboutLegacyLayout(t *testing.T) {
+	var buf bytes.Buffer
+	srv := newTestServer(t, &buf)
+	if err := os.WriteFile(filepath.Join(srv.cfg.DataDir, "session.db"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+	if out := buf.String(); !strings.Contains(out, "server.legacy_layout") || !strings.Contains(out, "POST /sessions") {
+		t.Fatalf("no migration warning in log:\n%s", out)
 	}
 }

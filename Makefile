@@ -14,10 +14,14 @@ VOLUME_NAME ?= whatsapp-mcp-data
 # Smoke-test the published :master image as a Claude Code MCP server.
 TEST_IMAGE_TAG ?= master
 TEST_CONTAINER ?= whatsapp-mcp-test
-TOKEN_FILE     := $(CURDIR)/.auth_token
-# Everything the container exposes lives behind this one endpoint; there is
-# no separate admin port (removed in 99b0ce7).
-MCP_URL        ?= http://localhost:8081/mcp
+# TOKEN_FILE holds the dev *session* token (what .mcp.json sends);
+# ADMIN_TOKEN_FILE holds the token for the /sessions admin API.
+TOKEN_FILE       := $(CURDIR)/.auth_token
+ADMIN_TOKEN_FILE := $(CURDIR)/.admin_token
+SESSION_ID       ?= dev
+BASE_URL         ?= http://localhost:8081
+# Everything the container exposes lives on this one port.
+MCP_URL        ?= $(BASE_URL)/mcp
 
 .PHONY: build test lint vet tidy clean image image-slim run-local run-master stop-master volume-rm pair-qr
 
@@ -60,18 +64,19 @@ run-local: image
 	  -p 8081:8081 \
 	  -v $(VOLUME_NAME):/data \
 	  -e TRANSPORT=$${TRANSPORT:-http} \
-	  -e AUTH_TOKEN=$${AUTH_TOKEN:-devtoken} \
+	  -e ADMIN_TOKEN=$${ADMIN_TOKEN:-devtoken} \
 	  $(IMAGE):$(IMAGE_TAG)
 
-# Pull and run the published :master image detached, with a stable AUTH_TOKEN
-# persisted at $(TOKEN_FILE). Pair the resulting container by:
+# Pull and run the published :master image detached, with a stable
+# ADMIN_TOKEN persisted at $(ADMIN_TOKEN_FILE), and create the
+# $(SESSION_ID) session once, saving its token at $(TOKEN_FILE). Then:
 #   1) export WHATSAPP_MCP_AUTH_TOKEN=$$(cat $(TOKEN_FILE))
 #   2) restart Claude Code so .mcp.json picks it up
 #   3) make pair-qr   (in another terminal)
 run-master:
-	@if [ ! -s $(TOKEN_FILE) ]; then \
-	  umask 077 && openssl rand -hex 32 > $(TOKEN_FILE) && \
-	  echo "generated $(TOKEN_FILE)"; \
+	@if [ ! -s $(ADMIN_TOKEN_FILE) ]; then \
+	  umask 077 && openssl rand -hex 32 > $(ADMIN_TOKEN_FILE) && \
+	  echo "generated $(ADMIN_TOKEN_FILE)"; \
 	fi
 	docker pull $(IMAGE):$(TEST_IMAGE_TAG)
 	-docker rm -f $(TEST_CONTAINER) >/dev/null 2>&1
@@ -82,12 +87,24 @@ run-master:
 	  --restart unless-stopped \
 	  -p 8081:8081 \
 	  -v $(VOLUME_NAME):/data \
-	  -e AUTH_TOKEN=$$(cat $(TOKEN_FILE)) \
+	  -e ADMIN_TOKEN=$$(cat $(ADMIN_TOKEN_FILE)) \
 	  $(IMAGE):$(TEST_IMAGE_TAG)
+	@for i in $$(seq 1 30); do curl -sf $(BASE_URL)/healthz >/dev/null && break; sleep 1; done
+	@if [ ! -s $(TOKEN_FILE) ]; then \
+	  command -v jq >/dev/null || { echo "jq not found (apt install jq)"; exit 1; }; \
+	  resp=$$(curl -s -X POST $(BASE_URL)/sessions \
+	    -H "Authorization: Bearer $$(cat $(ADMIN_TOKEN_FILE))" \
+	    -d '{"id":"$(SESSION_ID)"}'); \
+	  token=$$(printf '%s' "$$resp" | jq -r '.token // empty'); \
+	  [ -n "$$token" ] || { echo "POST /sessions failed: $$resp"; \
+	    echo "if the session exists but $(TOKEN_FILE) is lost, DELETE $(BASE_URL)/sessions/$(SESSION_ID) with the admin token"; exit 1; }; \
+	  (umask 077 && printf '%s\n' "$$token" > $(TOKEN_FILE)); \
+	  echo "created session $(SESSION_ID); token saved at $(TOKEN_FILE)"; \
+	fi
 	@echo
 	@echo "container: $(TEST_CONTAINER)  image: $(IMAGE):$(TEST_IMAGE_TAG)"
-	@echo "MCP HTTP endpoint: http://localhost:8081/mcp"
-	@echo "media byte route:  http://localhost:8081/media/<sha256>"
+	@echo "MCP HTTP endpoint: $(MCP_URL)"
+	@echo "admin API:         $(BASE_URL)/sessions"
 	@echo
 	@echo "next:"
 	@echo "  export WHATSAPP_MCP_AUTH_TOKEN=\$$(cat $(TOKEN_FILE))"
@@ -100,8 +117,8 @@ volume-rm:
 	docker volume rm $(VOLUME_NAME)
 
 # Drive the pairing_start / pairing_complete MCP tools and render each
-# rotating pair payload as a QR in the terminal. There is no admin HTTP API
-# any more (removed in 99b0ce7) — everything goes through /mcp.
+# rotating pair payload as a QR in the terminal, for the session whose token
+# is in $(TOKEN_FILE). Pairing itself always goes through /mcp.
 # Requires qrencode (apt: qrencode, brew: qrencode) and jq.
 pair-qr:
 	@command -v qrencode >/dev/null || { echo "qrencode not found (apt install qrencode)"; exit 1; }

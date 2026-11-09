@@ -39,30 +39,45 @@ https://github.com/user-attachments/assets/5a947d64-8d06-4a6c-a760-3a785398a84e
 
 You need: Docker, a phone with WhatsApp, and Claude Code.
 
+One container hosts **many WhatsApp sessions** — one per linked phone. Each
+session has its own bearer token, its own whatsmeow identity, chat cache and
+media store; a token only ever reaches its own session.
+
 ### 1. Run the container
 
 ```bash
 mkdir -p ~/whatsapp-mcp
-( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/.auth_token )
+( umask 077 && openssl rand -hex 32 > ~/whatsapp-mcp/.admin_token )
 
 docker run -d \
   --name whatsapp-mcp \
   --restart unless-stopped \
   -p 8081:8081 \
   -v whatsapp-mcp-data:/data \
-  -e AUTH_TOKEN="$(cat ~/whatsapp-mcp/.auth_token)" \
+  -e ADMIN_TOKEN="$(cat ~/whatsapp-mcp/.admin_token)" \
   docker.io/angelmanuel/whatsapp-mcp:latest
 ```
 
-`8081` carries everything: the MCP transport at `/mcp` and the media byte
-route at `/media/<sha256>`, both behind the same `AUTH_TOKEN`. There is no
-second port and no separate admin API.
+`8081` carries everything: the MCP transport at `/mcp`, the media byte
+routes at `/media`, and the `/sessions` admin API. There is no second port.
 
-### 2. Configure the MCP in Claude Code
+### 2. Create a session
+
+```bash
+curl -s -X POST http://localhost:8081/sessions \
+  -H "Authorization: Bearer $(cat ~/whatsapp-mcp/.admin_token)" \
+  -d '{"id":"me"}'
+# {"id":"me","token":"<43-char session token>","adopted":false}
+```
+
+The session token is shown **once** — the server stores only its SHA-256.
+Save it, e.g. `( umask 077 && echo '<token>' > ~/whatsapp-mcp/.me_token )`.
+
+### 3. Configure the MCP in Claude Code
 
 ```bash
 claude mcp add --transport http whatsapp http://localhost:8081/mcp \
-  --header "Authorization: Bearer $(cat ~/whatsapp-mcp/.auth_token)" \
+  --header "Authorization: Bearer $(cat ~/whatsapp-mcp/.me_token)" \
   --scope user
 ```
 
@@ -72,7 +87,7 @@ Then **ask Claude to pair the device.** It calls `pairing_start`
 through MCP, gets back the QR code, and renders it for you. Scan it in
 WhatsApp → Linked devices → **Link a device**. Claude polls
 `pairing_complete` until the link succeeds; the session then survives
-container restarts (everything lives under `/data`).
+container restarts (everything lives under `/data/sessions/<id>/`).
 
 For a project-scoped config (committed alongside a repo), use
 `--scope project` instead — `claude mcp add` writes to `./.mcp.json`.
@@ -83,7 +98,40 @@ launches Claude Code.
 > 💡 **Claude Desktop?** Claude Desktop only speaks **stdio** MCP, not
 > HTTP. Run the container with `-e TRANSPORT=stdio` and wrap it with a
 > stdio-bridging launcher (or just use Claude Code, which speaks HTTP
-> natively).
+> natively). Stdio serves exactly one session, `STDIO_SESSION`
+> (default `default`), with no admin API and no token.
+
+---
+
+## Sessions API
+
+Each session is one linked phone. The admin API manages them; it sits behind
+`ADMIN_TOKEN` when that is set, and is **anonymous when it is not** — in that
+case restrict `/sessions` at your ingress. Treat `ADMIN_TOKEN` as defence in
+depth behind the ingress, not as the only gate.
+
+| Request | Response |
+|---|---|
+| `POST /sessions` `{"id":"<id>"}` | `201` `{"id","token","adopted"}`. The token is shown once. `adopted` is true when `/data/sessions/<id>/` already existed and was picked up (see [Upgrading from 0.7](#upgrading-from-07)). |
+| `GET /sessions` | `200` `{"sessions":[{"id","status","created_at"}]}` |
+| `DELETE /sessions/{id}` | `200` `{"id","remote_logout"}`. Unlinks the device from the phone (best-effort — needs the session online; `remote_logout:false` means the phone may still list it under Linked devices), then wipes the session's directory. The token stops working immediately. |
+
+Ids match `^[a-z0-9][a-z0-9_-]{0,62}$`. Errors are JSON `{"error","code"}`:
+`400 invalid_id` / `bad_request`, `404 not_found`, `409 exists`,
+`409 session_limit` (`MAX_SESSIONS` reached).
+
+Session `status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `unpaired` | No phone linked yet. Pair with `pairing_start` over that session's MCP. |
+| `connected` | Linked and the socket is authenticated. |
+| `disconnected` | Linked, but the socket is down (reconnecting, or replaced by another client). |
+| `logged_out` | The phone or WhatsApp unlinked the device. The token still works; `pairing_start` links a phone again under it. |
+| `error` | Registered, but failed to open at startup (see the log). Its token gets `503` until a restart. |
+
+On `/mcp` and `/media`, `Authorization: Bearer <session token>` both
+authenticates the request and selects the session. An unknown token is `401`.
 
 ---
 
@@ -107,10 +155,13 @@ Most operators only touch these:
 
 | Var | Default | Notes |
 |---|---|---|
-| `TRANSPORT` | `http` | `http` or `stdio`. HTTP **requires** `AUTH_TOKEN`. |
-| `PORT` | `8081` | Serves `/mcp`, `/media` (upload), `/media/<sha256>` (download) and `/healthz`. |
-| `DATA_DIR` | `/data` | The only writable volume; holds `session.db` (whatsmeow identity), `cache.db` (chat/message cache), and `media/` (attachment blobs, both downloaded and staged for sending). |
-| `AUTH_TOKEN` | *(unset)* | Bearer token required on every HTTP request, `/mcp` and `/media/` alike. Only the `/healthz` probe is exempt; it exposes a coarse status string and no identity. |
+| `TRANSPORT` | `http` | `http` (many sessions, admin API) or `stdio` (one session). |
+| `PORT` | `8081` | Serves `/mcp`, `/media` (upload), `/media/<sha256>` (download), `/sessions` and `/healthz`. |
+| `DATA_DIR` | `/data` | The only writable volume. Holds `sessions.db` (session ids → token hashes) and `sessions/<id>/`, one directory per session with its `session.db` (whatsmeow identity), `cache.db` (chat/message cache) and `media/` (attachment blobs). |
+| `ADMIN_TOKEN` | *(unset)* | Bearer token for the `/sessions` admin API. **Unset leaves that API anonymous** (a warning is logged): restrict it at the ingress. Session tokens always gate `/mcp` and `/media`. |
+| `MAX_SESSIONS` | `20` | Cap on hosted sessions. Each holds a live WhatsApp socket and its own SQLite handles. |
+| `STDIO_SESSION` | `default` | The one session served when `TRANSPORT=stdio`. Created on first start. |
+| `AUTH_TOKEN` | — | **Removed.** Setting it is a fatal startup error; see [Upgrading from 0.7](#upgrading-from-07). |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them is a fatal startup error — there is no TLS listener, so they only ever served plaintext. Terminate TLS in a reverse proxy. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Label shown on the user's phone. |
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error`. |
@@ -123,7 +174,7 @@ Most operators only touch these:
 
 Full env-var contract: [REQUIREMENTS.md](REQUIREMENTS.md#configuration-environment-variables).
 
-In production, deliver `AUTH_TOKEN` as a tmpfs-mounted file referenced by
+In production, deliver `ADMIN_TOKEN` as a tmpfs-mounted file referenced by
 path, not via `-e` — `-e` exposes the secret to anyone who can read
 `/proc/<pid>/environ`.
 
@@ -157,10 +208,11 @@ Receiving an attachment is a two-step flow:
    ```
 
 2. Anything that needs the actual file `GET`s `media_path` on the **same
-   port, with the same bearer token**:
+   port, with the same session token**. Media is per session: another
+   session's token gets `404` for the same digest.
 
    ```bash
-   curl -H "Authorization: Bearer $AUTH_TOKEN" \
+   curl -H "Authorization: Bearer $SESSION_TOKEN" \
      http://localhost:8081/media/<sha256> -o video.mp4
    ```
 
@@ -184,7 +236,7 @@ Sending mirrors it, one step earlier:
    `download_media` returns:
 
    ```bash
-   curl -H "Authorization: Bearer $AUTH_TOKEN" \
+   curl -H "Authorization: Bearer $SESSION_TOKEN" \
      -H "Content-Type: image/jpeg" \
      --data-binary @holiday.jpg \
      "http://localhost:8081/media?filename=holiday.jpg"
@@ -302,27 +354,27 @@ Full pairing contract — events, error codes — is in
 ## Operational notes
 
 - **One process per `/data` volume.** Ratchet state rotates on every
-  message; the binary acquires an exclusive `flock` on `/data/.lock` at
-  startup and exits non-zero if another process owns it.
-- **`/data` is the only persistent volume.** Run `docker volume rm whatsapp-mcp-data`
-  to fully reset the device identity; preserve it across container restarts to avoid
-  re-pairing.
+  message; the binary acquires an exclusive `flock` on `/data/.lock` (and
+  each session on `/data/sessions/<id>/.lock`) at startup and exits non-zero
+  if another process owns it.
+- **`/data` is the only persistent volume.** `DELETE /sessions/{id}` resets
+  one session; `docker volume rm whatsapp-mcp-data` resets them all.
+  Preserve the volume across container restarts to avoid re-pairing.
+- **Every paired session stays connected** so incoming messages keep
+  reaching its cache. Size `MAX_SESSIONS` to your memory budget.
 - **Read-only root filesystem compatible** — mount `/` as `ro`,
   `/data` and `/tmp` as `rw`.
 - **Healthcheck is built-in** — `whatsapp-mcp --healthcheck` probes the
   unauthenticated `http://127.0.0.1:$PORT/healthz` endpoint. No shell or curl
-  needed in the distroless image. The probe reflects WhatsApp state, not just
-  process liveness: `{"status":"ok"}` when paired and connected,
-  `{"status":"awaiting_pairing"}` (still 200 — a container waiting to be
-  linked is not faulty) when no device is on disk, and
-  `{"status":"disconnected"}` with **HTTP 503** when the device is linked but
-  the socket is down. That last state is why the probe is not a flat 200: a
-  container whose socket dies otherwise keeps reporting healthy while every
-  tool call fails.
-- **Media is a bounded store.** `$DATA_DIR/media` holds both attachments
-  fetched by `download_media` and bytes staged via `POST /media`, capped by
-  `MEDIA_MAX_BYTES` / `MEDIA_TTL` (and per-request by
-  `MEDIA_MAX_UPLOAD_BYTES`). Evicting a *downloaded* blob costs a round trip
+  needed in the distroless image. It reports process liveness — always 200
+  while the server is up, because one phone going offline must not mark a
+  container hosting many sessions unhealthy — plus per-status counts and no
+  ids: `{"status":"ok","sessions":{"connected":3,"unpaired":1}}`. Use
+  `GET /sessions` for per-session state.
+- **Media is a bounded store, per session.** `$DATA_DIR/sessions/<id>/media`
+  holds both attachments fetched by `download_media` and bytes staged via
+  `POST /media`, capped by `MEDIA_MAX_BYTES` / `MEDIA_TTL` (and per-request
+  by `MEDIA_MAX_UPLOAD_BYTES`). The caps apply to **each** session. Evicting a *downloaded* blob costs a round trip
   on the next `download_media` call, not data — but an *uploaded* blob has
   no origin to re-fetch from, so upload shortly before you send, and treat a
   `not_found` from `send_file` as "upload it again".
@@ -331,6 +383,35 @@ Full pairing contract — events, error codes — is in
   bind mount instead, add `--userns=keep-id` so the host directory is writable
   by the container user.
 - **No telemetry.** The binary does not phone home.
+
+## Upgrading from 0.7
+
+The multi-session release (0.8) replaces the single `AUTH_TOKEN` with per-session tokens and moves the
+old flat `/data` layout into `/data/sessions/<id>/`. The new image refuses to
+start while `AUTH_TOKEN` is set, and logs these steps when it finds an old
+`/data/session.db`. Files are never moved automatically. Your phone stays
+linked: no re-pairing.
+
+```bash
+# 1. Stop the old container (keep the volume).
+docker stop whatsapp-mcp && docker rm whatsapp-mcp
+
+# 2. Move the old files into a session directory named "default".
+docker run --rm -v whatsapp-mcp-data:/data busybox sh -c '
+  mkdir -p /data/sessions/default &&
+  mv /data/session.db* /data/cache.db* /data/media /data/sessions/default/ &&
+  chown -R 1000:1000 /data/sessions && chmod 700 /data/sessions/default'
+
+# 3. Start the new image with ADMIN_TOKEN instead of AUTH_TOKEN (see Quick start).
+
+# 4. Adopt the directory. "adopted": true confirms the old pairing was found.
+curl -s -X POST http://localhost:8081/sessions \
+  -H "Authorization: Bearer $(cat ~/whatsapp-mcp/.admin_token)" \
+  -d '{"id":"default"}'
+```
+
+Finally, point the MCP client's `Authorization` header at the new session
+token. `GET /sessions` should show `default` as `connected`.
 
 ## Building locally
 
