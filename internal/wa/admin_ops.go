@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
+
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/pgdb"
 )
 
 // pairSession tracks the lifetime of a pairing flow. Only one can be active
@@ -241,19 +244,14 @@ func (c *Client) Unpair(ctx context.Context) error {
 		oldWM.RemoveEventHandler(oldHandlerID)
 		oldWM.Disconnect()
 	}
-	if oldContainer != nil {
+	if oldContainer != nil && c.cfg.DB == nil {
 		if err := oldContainer.Close(); err != nil {
 			c.log.Warnf("wa: unpair close sqlstore: %v", err)
 		}
 	}
 
-	// Remove session.db and the WAL/SHM sidecar files. Any error other than
-	// "not exist" is fatal: we cannot safely reopen if the FS is wedged.
-	base := filepath.Join(c.cfg.DataDir, "session.db")
-	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-		if err := os.Remove(base + suffix); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("wa: remove %s: %w", base+suffix, err)
-		}
+	if err := c.wipeSessionStore(ctx); err != nil {
+		return err
 	}
 
 	// Reopen sqlstore + fresh empty device + new whatsmeow client.
@@ -331,6 +329,52 @@ func (c *Client) Logout(ctx context.Context) error {
 	if err := wm.Logout(ctx); err != nil {
 		c.stopReconnect.Store(false)
 		return err
+	}
+	return nil
+}
+
+// wipeSessionStore erases every whatsmeow row for this session, the way
+// deleting session.db does on SQLite. Any error is fatal to Unpair: we
+// cannot safely reopen on half-wiped state.
+func (c *Client) wipeSessionStore(ctx context.Context) error {
+	if c.cfg.DB == nil {
+		// Remove session.db and the WAL/SHM sidecar files.
+		base := filepath.Join(c.cfg.DataDir, "session.db")
+		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+			if err := os.Remove(base + suffix); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("wa: remove %s: %w", base+suffix, err)
+			}
+		}
+		return nil
+	}
+	// Postgres: empty every whatsmeow table in this session's schema, but
+	// keep the tables and whatsmeow_version so the reopen needs no upgrade.
+	rows, err := c.cfg.DB.QueryContext(ctx, `
+SELECT tablename FROM pg_tables
+WHERE schemaname = current_schema()
+  AND starts_with(tablename, 'whatsmeow_')
+  AND tablename <> 'whatsmeow_version'`)
+	if err != nil {
+		return fmt.Errorf("wa: list session tables: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("wa: list session tables: %w", err)
+		}
+		tables = append(tables, pgdb.QuoteIdent(t))
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("wa: list session tables: %w", err)
+	}
+	if len(tables) == 0 {
+		return nil
+	}
+	if _, err := c.cfg.DB.ExecContext(ctx, "TRUNCATE "+strings.Join(tables, ", ")+" CASCADE"); err != nil {
+		return fmt.Errorf("wa: wipe session tables: %w", err)
 	}
 	return nil
 }

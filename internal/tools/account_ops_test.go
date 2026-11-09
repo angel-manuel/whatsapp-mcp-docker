@@ -643,11 +643,10 @@ func TestMarkRead_CacheFailureWarnsButStillReportsTheReceipt(t *testing.T) {
 	mock := &mockWA{}
 	h := newHarness(t, true, seedUnreadChats, mock)
 
-	// Closing the store is the only way to make SetChatUnread fail through
-	// the real store the harness wires in. sql.DB.Close is idempotent, so
-	// the harness cleanup closing it again is fine.
-	if err := h.store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
+	// Dropping the chats table makes SetChatUnread fail through the real
+	// store the harness wires in, on SQLite and Postgres alike.
+	if _, err := h.store.DB().ExecContext(context.Background(), `DROP TABLE chats`); err != nil {
+		t.Fatalf("drop chats: %v", err)
 	}
 
 	res := callTool(t, h, "mark_read", map[string]any{

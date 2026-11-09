@@ -36,8 +36,13 @@ type Config struct {
 	// behind the ingress, which is expected to restrict it.
 	AdminToken string
 	// MaxSessions caps how many WhatsApp sessions this process hosts. Each
-	// one holds a live websocket and its own SQLite handles.
+	// one holds a live websocket and its own database handles.
 	MaxSessions int
+	// DatabaseURL, when set to a postgres:// URL, moves the session registry
+	// and every session's whatsmeow store and cache into Postgres, one
+	// schema per session. Media still lives under DataDir. Empty keeps
+	// everything in SQLite files under DataDir.
+	DatabaseURL string
 	// StdioSession names the single session served in stdio mode, which has
 	// no HTTP admin API to create one. It is created on first start.
 	StdioSession string
@@ -105,6 +110,7 @@ func Load() (*Config, error) {
 		LogLevel:       strings.ToLower(getEnv("LOG_LEVEL", "info")),
 		LogFormat:      strings.ToLower(getEnv("LOG_FORMAT", "json")),
 		AdminToken:     os.Getenv("ADMIN_TOKEN"),
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		StdioSession:   getEnv("STDIO_SESSION", "default"),
 		MTLSCAFile:     os.Getenv("MTLS_CA_FILE"),
 		MTLSCertFile:   os.Getenv("MTLS_CERT_FILE"),
@@ -185,6 +191,13 @@ func (c *Config) Validate() error {
 
 	if c.DataDir == "" {
 		return errors.New("DATA_DIR must not be empty")
+	}
+
+	if c.DatabaseURL != "" &&
+		!strings.HasPrefix(c.DatabaseURL, "postgres://") &&
+		!strings.HasPrefix(c.DatabaseURL, "postgresql://") {
+		// Never echo the value: it usually carries a password.
+		return errors.New("DATABASE_URL must be a postgres:// or postgresql:// URL")
 	}
 
 	if c.MaxSessions < 1 {

@@ -175,7 +175,7 @@ Tools that answer purely from the local cache MUST be exempt from `not_connected
 ## Session persistence
 
 - `/data` is the only persistent volume; nuke it to fully reset the device identity.
-- `whatsmeow` is configured with its SQLite `sqlstore` pointed at `/data/session.db`. Ratchet state rotates on every message, so only one process may own the volume at a time — the binary acquires an exclusive `flock` on `/data/.lock` at startup and exits non-zero if it is already held.
+- Each session's `whatsmeow` `sqlstore` lives in `/data/sessions/<id>/session.db`, or in Postgres schema `wa_<id>` when `DATABASE_URL` is set. Ratchet state rotates on every message, so only one process may drive a session at a time: the binary acquires an exclusive `flock` on `/data/.lock` (and per session on `/data/sessions/<id>/.lock`) at startup and exits non-zero if it is already held. On Postgres it additionally takes a database-wide advisory lock at startup and a per-session advisory lock while each session is open.
 - The cache DB at `/data/cache.db` stores the same entities Felix's reference ships: chats, messages, contacts, nicknames, FTS index over message text. It additionally stores poll ballots and votes (`polls`, `poll_options`, `poll_votes`, migration `006`), which have no reference equivalent because poll tallies exist nowhere else — see `get_poll_results` in CHANGES.md. Schema documented in `docs/schema.md`.
 
 ## Session lifecycle events
@@ -207,6 +207,7 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 | `ADMIN_TOKEN` | *(unset)* | Bearer token for the `/sessions` admin API. Unset → the admin API is anonymous (logged as a warning). |
 | `MAX_SESSIONS` | `20` | Cap on hosted sessions. `POST /sessions` beyond it → `409 session_limit`. |
 | `STDIO_SESSION` | `default` | The single session served in `stdio` mode. |
+| `DATABASE_URL` | *(unset)* | `postgres://` or `postgresql://` URL. When set, the registry lives in schema `whatsapp_mcp` and each session's whatsmeow store and cache in schema `wa_<id>`; media stays under `DATA_DIR`. Any other scheme is a fatal startup error, which never echoes the value. Unset → SQLite files under `DATA_DIR`. |
 | `AUTH_TOKEN` | — | Removed. Setting it is a fatal startup error pointing at the migration steps in README.md. |
 | `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them in `http` mode is a fatal startup error. No TLS listener exists, so they never encrypted anything or verified a client certificate. If mTLS is ever built, it will be additive to bearer tokens, never a replacement. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Shown on the user's phone after pairing. |

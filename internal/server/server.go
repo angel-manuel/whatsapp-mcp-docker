@@ -19,6 +19,7 @@ import (
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/config"
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/pgdb"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/sessions"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
@@ -54,6 +55,7 @@ func (s *Server) sessionOptions() sessions.Options {
 		MediaTTL:            s.cfg.MediaTTL,
 		MediaSweepInterval:  s.cfg.MediaSweepInterval,
 		MediaMaxUploadBytes: s.cfg.MediaMaxUploadBytes,
+		DatabaseURL:         s.cfg.DatabaseURL,
 		Logger:              s.log,
 	}
 }
@@ -67,6 +69,7 @@ func (s *Server) Run(ctx context.Context) error {
 		slog.String("bind_addr", s.cfg.BindAddr),
 		slog.Int("port", s.cfg.Port),
 		slog.String("data_dir", s.cfg.DataDir),
+		slog.String("database", s.databaseKind()),
 	)
 
 	if err := os.MkdirAll(s.cfg.DataDir, 0o700); err != nil {
@@ -80,6 +83,17 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	defer func() { _ = rootLock.Release() }()
 
+	// With Postgres, the flock above only guards this volume. Two hosts with
+	// different volumes pointed at one database would still drive the same
+	// sessions, so the database gets a lock of its own.
+	if s.cfg.DatabaseURL != "" {
+		release, err := s.lockDatabase(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+
 	s.warnLegacyLayout()
 
 	var runErr error
@@ -90,6 +104,50 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	applog.WithEvent(s.log, "server.stop").Info("server stopping")
 	return runErr
+}
+
+// databaseKind names the storage backend for the startup log. The URL itself
+// is never logged: it usually carries a password.
+func (s *Server) databaseKind() string {
+	if s.cfg.DatabaseURL != "" {
+		return "postgres"
+	}
+	return "sqlite"
+}
+
+// lockDatabase takes the process-wide advisory lock on the configured
+// Postgres database, failing fast when another process holds it.
+func (s *Server) lockDatabase(ctx context.Context) (func(), error) {
+	db, err := pgdb.Open(ctx, s.cfg.DatabaseURL, "", 1)
+	if err != nil {
+		return nil, err
+	}
+	lock, err := pgdb.TryLock(ctx, db, "whatsapp-mcp/root")
+	if err != nil {
+		_ = db.Close()
+		if errors.Is(err, pgdb.ErrLockHeld) {
+			return nil, fmt.Errorf("lock database: another whatsapp-mcp process is using this DATABASE_URL: %w", err)
+		}
+		return nil, fmt.Errorf("lock database: %w", err)
+	}
+	return func() {
+		_ = lock.Release()
+		_ = db.Close()
+	}, nil
+}
+
+// openRegistry opens the session registry on the configured backend and
+// returns the storage that matches it.
+func (s *Server) openRegistry(ctx context.Context) (*sessions.Registry, sessions.Storage, error) {
+	if s.cfg.DatabaseURL == "" {
+		reg, err := sessions.OpenRegistry(ctx, s.cfg.RegistryPath())
+		return reg, sessions.FSStorage{}, err
+	}
+	reg, err := sessions.OpenPostgresRegistry(ctx, s.cfg.DatabaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reg, sessions.PostgresStorage{DB: reg.DB()}, nil
 }
 
 // warnLegacyLayout spots a 0.7 volume — session.db directly under DATA_DIR —
@@ -155,7 +213,7 @@ func (s *Server) runStdio(ctx context.Context) error {
 
 // runHTTP hosts every registered session behind one listener.
 func (s *Server) runHTTP(ctx context.Context) error {
-	reg, err := sessions.OpenRegistry(context.Background(), s.cfg.RegistryPath())
+	reg, storage, err := s.openRegistry(context.Background())
 	if err != nil {
 		return err
 	}
@@ -164,7 +222,7 @@ func (s *Server) runHTTP(ctx context.Context) error {
 	opts := s.sessionOptions()
 	mgr := sessions.NewManager(reg, s.cfg.SessionsDir(), s.cfg.MaxSessions,
 		func(id, dir string) (sessions.Instance, error) { return sessions.Open(id, dir, opts) },
-		s.log)
+		s.log).WithStorage(storage)
 	if err := mgr.Start(ctx); err != nil {
 		return err
 	}

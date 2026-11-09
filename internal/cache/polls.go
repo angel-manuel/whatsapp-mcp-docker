@@ -73,7 +73,7 @@ func (s *Store) UpsertPoll(ctx context.Context, p Poll) error {
 		return errors.New("cache: UpsertPoll: ChatJID and MessageID required")
 	}
 	now := time.Now().Unix()
-	return s.inTx(ctx, func(tx *sql.Tx) error {
+	return s.inTx(ctx, func(tx *Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO polls (chat_jid, message_id, question, selectable_count, sender_jid, is_from_me, ts, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)

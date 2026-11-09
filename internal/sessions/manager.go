@@ -78,11 +78,12 @@ type entry struct {
 // Manager owns every hosted session: the registry, the open instances and
 // the token-hash index requests are routed by.
 type Manager struct {
-	reg  *Registry
-	root string
-	max  int
-	open Opener
-	log  *slog.Logger
+	reg     *Registry
+	root    string
+	max     int
+	open    Opener
+	log     *slog.Logger
+	storage Storage
 
 	mu      sync.RWMutex
 	byID    map[string]*entry
@@ -101,10 +102,18 @@ func NewManager(reg *Registry, root string, maxSessions int, open Opener, log *s
 		max:     maxSessions,
 		open:    open,
 		log:     log,
+		storage: FSStorage{},
 		byID:    map[string]*entry{},
 		byHash:  map[TokenHash]*entry{},
 		pending: map[string]struct{}{},
 	}
+}
+
+// WithStorage sets where session state lives (FSStorage by default) and
+// returns m. Call it before Start.
+func (m *Manager) WithStorage(s Storage) *Manager {
+	m.storage = s
+	return m
 }
 
 // Start opens every registered session. A session that fails to open is
@@ -137,31 +146,25 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.byHash[rec.Hash] = e
 		m.mu.Unlock()
 	}
-	m.warnOrphans(registered)
+	m.warnOrphans(ctx, registered)
 	m.log.Info("sessions started",
 		slog.String("event_type", "sessions.start"),
 		slog.Int("sessions", len(recs)))
 	return nil
 }
 
-// warnOrphans logs session directories with no registry row: data a POST
+// warnOrphans logs stored session state with no registry row: data a POST
 // /sessions with that id would adopt (the 0.7 migration path), or debris
 // from an interrupted Delete.
-func (m *Manager) warnOrphans(registered map[string]struct{}) {
-	ents, err := os.ReadDir(m.root)
+func (m *Manager) warnOrphans(ctx context.Context, registered map[string]struct{}) {
+	orphans, err := m.storage.Orphans(ctx, m.root, registered)
 	if err != nil {
 		return
 	}
-	for _, de := range ents {
-		if !de.IsDir() {
-			continue
-		}
-		if _, ok := registered[de.Name()]; ok {
-			continue
-		}
-		m.log.Warn("session directory has no registry entry; POST /sessions with this id adopts it",
+	for _, name := range orphans {
+		m.log.Warn("session state has no registry entry; POST /sessions with this id adopts it",
 			slog.String("event_type", "sessions.orphan_dir"),
-			slog.String("session", de.Name()))
+			slog.String("session", name))
 	}
 }
 
@@ -209,13 +212,15 @@ func (m *Manager) Create(ctx context.Context, id string) (Created, error) {
 		m.mu.Unlock()
 	}()
 
-	_, statErr := os.Stat(dir)
-	adopted := statErr == nil
-	// Only ever remove a directory this call created: an adopted one holds
+	adopted, err := m.storage.Exists(ctx, id, dir)
+	if err != nil {
+		return Created{}, fmt.Errorf("sessions: check %s: %w", id, err)
+	}
+	// Only ever remove state this call created: adopted state holds
 	// someone's pairing and history.
 	cleanup := func() {
 		if !adopted {
-			_ = os.RemoveAll(dir)
+			_ = m.storage.Wipe(context.WithoutCancel(ctx), id, dir)
 		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -316,8 +321,8 @@ func (m *Manager) Delete(ctx context.Context, id string) (Deleted, error) {
 	if err != nil {
 		return res, err
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return res, fmt.Errorf("sessions: wipe %s: %w", dir, err)
+	if err := m.storage.Wipe(ctx, id, dir); err != nil {
+		return res, err
 	}
 	m.log.Info("session deleted",
 		slog.String("event_type", "sessions.delete"),

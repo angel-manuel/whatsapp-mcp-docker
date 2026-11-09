@@ -11,7 +11,7 @@ import (
 var allVars = []string{
 	"TRANSPORT", "BIND_ADDR", "PORT", "DATA_DIR",
 	"LOG_LEVEL", "LOG_FORMAT", "AUTH_TOKEN", "ADMIN_TOKEN",
-	"MAX_SESSIONS", "STDIO_SESSION",
+	"MAX_SESSIONS", "STDIO_SESSION", "DATABASE_URL",
 	"MTLS_CA_FILE", "MTLS_CERT_FILE", "MTLS_KEY_FILE",
 	"WHATSAPP_DEVICE_NAME", "FFMPEG_PATH", "ENABLE_PPROF",
 	"MEDIA_MAX_BYTES", "MEDIA_TTL", "MEDIA_SWEEP_INTERVAL",
@@ -149,6 +149,39 @@ func TestLoad_SessionSettingsRejectBadValues(t *testing.T) {
 				t.Fatalf("Load: want error for %s=%q", tc.key, tc.value)
 			}
 		})
+	}
+}
+
+func TestLoad_DatabaseURL(t *testing.T) {
+	for _, url := range []string{
+		"postgres://u:p@db:5432/wa?sslmode=disable",
+		"postgresql://u@db/wa",
+	} {
+		clearEnv(t)
+		t.Setenv("TRANSPORT", "stdio")
+		t.Setenv("DATABASE_URL", url)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load(%q): %v", url, err)
+		}
+		if cfg.DatabaseURL != url {
+			t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, url)
+		}
+	}
+}
+
+func TestLoad_DatabaseURLRejectsOtherSchemesWithoutEchoingIt(t *testing.T) {
+	for _, url := range []string{"mysql://u:hunter2@db/wa", "sqlite:///data/x.db", "hunter2"} {
+		clearEnv(t)
+		t.Setenv("TRANSPORT", "stdio")
+		t.Setenv("DATABASE_URL", url)
+		_, err := Load()
+		if err == nil {
+			t.Fatalf("Load: want error for DATABASE_URL=%q", url)
+		}
+		if strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("error leaks the URL: %v", err)
+		}
 	}
 }
 

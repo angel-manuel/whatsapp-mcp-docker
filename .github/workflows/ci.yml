@@ -65,6 +65,38 @@ jobs:
       - name: go build
         run: go build ./...
 
+  # The same suite against Postgres: every cache, tool, session and wa test
+  # that opens a store runs on a throwaway schema when TEST_DATABASE_URL is
+  # set, plus the Postgres-only tests that skip without it.
+  test-postgres:
+    name: test (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: go test
+        run: go test ./... -race -count=1
+
   lint:
     name: lint
     runs-on: ubuntu-latest

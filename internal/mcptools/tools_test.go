@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache/cachetest"
+
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	mcpclienttransport "github.com/mark3labs/mcp-go/client/transport"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -92,11 +94,7 @@ func newServerAndClient(t *testing.T) *mcpclient.Client {
 func newServerAndClientWithExtras(t *testing.T, extras func(*cache.Store)) *mcpclient.Client {
 	t.Helper()
 
-	store, err := cache.Open(context.Background(), t.TempDir())
-	if err != nil {
-		t.Fatalf("cache.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := cachetest.Open(t)
 	seedFixtures(t, store)
 	if extras != nil {
 		extras(store)
@@ -864,11 +862,7 @@ func TestGetConversation_RejectsEmptyContact(t *testing.T) {
 func TestNotPairedGatesAllCacheTools(t *testing.T) {
 	t.Parallel()
 
-	store, err := cache.Open(context.Background(), t.TempDir())
-	if err != nil {
-		t.Fatalf("cache.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := cachetest.Open(t)
 	seedFixtures(t, store)
 
 	reg := mcp.NewRegistry()
