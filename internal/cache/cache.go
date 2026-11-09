@@ -1,24 +1,48 @@
-// Package cache owns the local SQLite mirror of WhatsApp chats, messages,
-// contacts, and the nickname store. It is the read side for the MCP tool
-// surface and the write side for the event ingestor.
+// Package cache owns the local mirror of WhatsApp chats, messages, contacts,
+// and the nickname store. It is the read side for the MCP tool surface and
+// the write side for the event ingestor. It runs on SQLite (one cache.db per
+// session) or on Postgres (a pool scoped to the session's schema).
 package cache
 
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 
+	"go.mau.fi/util/dbutil"
+
 	_ "modernc.org/sqlite" // sqlite driver
 )
 
-// Store is a handle to the cache SQLite database.
+//go:embed upgrades/*.sql
+var upgradesFS embed.FS
+
+// upgradeTable is the cache schema history, applied by dbutil.
+var upgradeTable = dbutil.BuildUpgradeTable().WithFSPath(upgradesFS, "upgrades").Finish()
+
+// VersionTable records the cache schema version. It is distinct from
+// whatsmeow's own version table so both can share one Postgres schema.
+const VersionTable = "cache_version"
+
+// legacyTables are the tables written by the pre-dbutil migration system.
+// A cache.db that still has _schema_version is dropped and rebuilt: the
+// cache is a re-syncable mirror, so starting empty loses nothing durable.
+var legacyTables = []string{
+	"messages_fts", "poll_votes", "poll_options", "polls", "reactions",
+	"jid_aliases", "nicknames", "contacts", "messages", "chats", "_schema_version",
+}
+
+// Store is a handle to the cache database.
 type Store struct {
-	db   *sql.DB
-	path string
+	db     *DB
+	dbu    *dbutil.Database
+	path   string
+	ownsDB bool
 }
 
 // Open opens (creating if needed) `dataDir/cache.db`, applies any pending
@@ -31,17 +55,30 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("cache: create data dir: %w", err)
 	}
 	path := filepath.Join(dataDir, "cache.db")
-	return openAt(ctx, path)
+	return openSQLite(ctx, path)
 }
 
 // OpenInMemory opens an in-memory SQLite database. Intended for tests.
 func OpenInMemory(ctx context.Context) (*Store, error) {
-	return openAt(ctx, ":memory:")
+	return openSQLite(ctx, ":memory:")
 }
 
-func openAt(ctx context.Context, path string) (*Store, error) {
-	dsn := buildDSN(path)
-	db, err := sql.Open("sqlite", dsn)
+// OpenWithDB runs the cache on an existing pool, such as a session's
+// Postgres pool shared with whatsmeow. The caller keeps ownership: Close
+// does not close db.
+func OpenWithDB(ctx context.Context, db *sql.DB, dialect dbutil.Dialect) (*Store, error) {
+	s, err := newStore(db, dialect, "", false)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Migrate(ctx); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func openSQLite(ctx context.Context, path string) (*Store, error) {
+	db, err := sql.Open("sqlite", buildDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("cache: open %s: %w", path, err)
 	}
@@ -54,12 +91,71 @@ func openAt(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("cache: ping: %w", err)
 	}
-	s := &Store{db: db, path: path}
+	s, err := newStore(db, dbutil.SQLite, path, true)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.Migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+func newStore(db *sql.DB, dialect dbutil.Dialect, path string, owns bool) (*Store, error) {
+	dbu, err := dbutil.NewWithDB(db, dialect.String())
+	if err != nil {
+		return nil, fmt.Errorf("cache: wrap db: %w", err)
+	}
+	dbu.VersionTable = VersionTable
+	dbu.UpgradeTable = upgradeTable
+	return &Store{
+		db:     &DB{raw: db, dialect: dialect},
+		dbu:    dbu,
+		path:   path,
+		ownsDB: owns,
+	}, nil
+}
+
+// Migrate brings the schema up to date. A cache written by the pre-dbutil
+// migration system is dropped first and rebuilt empty.
+func (s *Store) Migrate(ctx context.Context) error {
+	if s.db.dialect == dbutil.SQLite {
+		legacy, err := s.dbu.TableExists(ctx, "_schema_version")
+		if err != nil {
+			return fmt.Errorf("cache: check legacy schema: %w", err)
+		}
+		if legacy {
+			for _, t := range legacyTables {
+				if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
+					return fmt.Errorf("cache: drop legacy table %s: %w", t, err)
+				}
+			}
+		}
+	}
+	// dbutil decides whether the version table exists by asking
+	// information_schema, which on Postgres spans every schema in the
+	// database. With one schema per session, another session's table would
+	// answer for this one, so create it here, in the current schema, first.
+	if _, err := s.db.ExecContext(ctx,
+		"CREATE TABLE IF NOT EXISTS "+VersionTable+" (version INTEGER, compat INTEGER)"); err != nil {
+		return fmt.Errorf("cache: create version table: %w", err)
+	}
+	if err := s.dbu.Upgrade(ctx); err != nil {
+		return fmt.Errorf("cache: upgrade schema: %w", err)
+	}
+	return nil
+}
+
+// CurrentSchemaVersion returns the applied schema version, or 0 if none.
+func (s *Store) CurrentSchemaVersion(ctx context.Context) (int, error) {
+	var v sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM `+VersionTable).Scan(&v)
+	if err != nil {
+		return 0, fmt.Errorf("cache: read schema version: %w", err)
+	}
+	return int(v.Int64), nil
 }
 
 func buildDSN(path string) string {
@@ -77,17 +173,26 @@ func buildDSN(path string) string {
 	return "file:" + path + "?" + v.Encode()
 }
 
-// DB returns the underlying database handle. Intended for read-side tool
-// implementations; writers should use the typed helpers in this package.
-func (s *Store) DB() *sql.DB { return s.db }
+// DB returns the query handle. Intended for read-side tool implementations;
+// writers should use the typed helpers in this package. Queries use `?`
+// placeholders on every dialect.
+func (s *Store) DB() *DB { return s.db }
 
-// Path returns the filesystem path the store was opened at, or ":memory:".
+// Dialect reports which database engine backs the store.
+func (s *Store) Dialect() dbutil.Dialect { return s.db.dialect }
+
+// Path returns the filesystem path the store was opened at, ":memory:", or
+// "" when it runs on a caller-provided pool.
 func (s *Store) Path() string { return s.path }
 
-// Close closes the underlying database handle.
+// Close closes the underlying database handle if the store opened it.
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || !s.ownsDB {
 		return nil
 	}
-	return s.db.Close()
+	return s.db.raw.Close()
+}
+
+func (s *Store) inTx(ctx context.Context, fn func(*Tx) error) error {
+	return s.db.inTx(ctx, fn)
 }

@@ -2,6 +2,7 @@ package wa
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
@@ -14,6 +15,8 @@ import (
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
+
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/pgdb"
 
 	// Register the pure-Go SQLite driver under the name "sqlite" so that
 	// whatsmeow's sqlstore can open it without a cgo runtime.
@@ -44,9 +47,15 @@ var (
 
 // Config controls how the wa.Client is constructed.
 type Config struct {
-	// DataDir is the persistent volume root (default: /data). The sqlstore
-	// lives at {DataDir}/session.db and the exclusive lock at {DataDir}/.lock.
+	// DataDir is the persistent volume root (default: /data). On SQLite the
+	// sqlstore lives at {DataDir}/session.db and the exclusive lock at
+	// {DataDir}/.lock.
 	DataDir string
+	// DB, when set, holds the sqlstore instead of {DataDir}/session.db: a
+	// Postgres pool whose search_path is this session's schema. The pool is
+	// borrowed — Close leaves it open — and exclusivity comes from a
+	// Postgres advisory lock on that schema rather than the data-dir flock.
+	DB *sql.DB
 	// Logger receives whatsmeow's internal logs. Nil defaults to Noop.
 	Logger waLog.Logger
 	// PairDeviceName is the label shown on the user's phone after pairing.
@@ -74,7 +83,8 @@ type Client struct {
 	log waLog.Logger
 	cfg Config
 
-	lock *lockfile
+	// unlock releases whichever exclusive lock Open took.
+	unlock func() error
 
 	// adminMu serializes mutating admin operations (StartPairing, PairPhone,
 	// Unpair) against each other. Holders must not also hold mu.
@@ -128,22 +138,22 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("create data dir %s: %w", cfg.DataDir, err)
 	}
 
-	lock, err := acquireLock(filepath.Join(cfg.DataDir, ".lock"))
+	unlock, err := acquireSessionLock(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	c := &Client{
-		log:   cfg.Logger,
-		cfg:   cfg,
-		lock:  lock,
-		rawCh: make(chan any, 64),
-		quit:  make(chan struct{}),
-		done:  make(chan struct{}),
+		log:    cfg.Logger,
+		cfg:    cfg,
+		unlock: unlock,
+		rawCh:  make(chan any, 64),
+		quit:   make(chan struct{}),
+		done:   make(chan struct{}),
 	}
 
 	if err := c.openWhatsmeow(ctx); err != nil {
-		_ = lock.release()
+		_ = unlock()
 		return nil, err
 	}
 
@@ -173,21 +183,20 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 // populates c.container/c.device/c.wm/c.handlerID. Callers must not hold
 // c.mu; openWhatsmeow does not touch c.state or c.stopReconnect.
 func (c *Client) openWhatsmeow(ctx context.Context) error {
-	dsn := sessionDSN(c.cfg.DataDir)
-	container, err := sqlstore.New(ctx, "sqlite", dsn, c.log)
+	container, err := c.openContainer(ctx)
 	if err != nil {
 		return fmt.Errorf("open sqlstore: %w", err)
 	}
 
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
-		_ = container.Close()
+		c.closeContainer(container)
 		return fmt.Errorf("load device: %w", err)
 	}
 
 	wm := whatsmeow.NewClient(device, c.log)
 	if wm == nil {
-		_ = container.Close()
+		c.closeContainer(container)
 		return errors.New("wa: whatsmeow.NewClient returned nil")
 	}
 
@@ -263,12 +272,12 @@ func (c *Client) Close() error {
 		<-c.done
 
 		var errs []error
-		if container != nil {
+		if container != nil && c.cfg.DB == nil {
 			if err := container.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close sqlstore: %w", err))
 			}
 		}
-		if err := c.lock.release(); err != nil {
+		if err := c.unlock(); err != nil {
 			errs = append(errs, fmt.Errorf("release lock: %w", err))
 		}
 		result = errors.Join(errs...)
@@ -309,6 +318,60 @@ func (c *Client) Status() Status {
 		st.LastEvent = &evt
 	}
 	return st
+}
+
+// openContainer opens the sqlstore on the configured backend and brings its
+// schema up to date.
+func (c *Client) openContainer(ctx context.Context) (*sqlstore.Container, error) {
+	if c.cfg.DB == nil {
+		return sqlstore.New(ctx, "sqlite", sessionDSN(c.cfg.DataDir), c.log)
+	}
+	// dbutil asks information_schema whether its version table exists, and
+	// on Postgres that view spans every schema: another session's table
+	// would answer for this one. Creating it here, in this session's
+	// schema, keeps the check honest.
+	if _, err := c.cfg.DB.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS whatsmeow_version (version INTEGER, compat INTEGER)`); err != nil {
+		return nil, fmt.Errorf("create whatsmeow_version: %w", err)
+	}
+	container := sqlstore.NewWithDB(c.cfg.DB, pgdb.DriverName, c.log)
+	if err := container.Upgrade(ctx); err != nil {
+		return nil, fmt.Errorf("upgrade: %w", err)
+	}
+	return container, nil
+}
+
+// closeContainer closes a container this client opened. A container on a
+// borrowed Postgres pool is left alone: closing it would close the pool.
+func (c *Client) closeContainer(container *sqlstore.Container) {
+	if c.cfg.DB == nil {
+		_ = container.Close()
+	}
+}
+
+// acquireSessionLock takes the lock that makes this process the only one
+// driving the session: a flock on {DataDir}/.lock for SQLite, or an
+// advisory lock named after the session's schema for Postgres.
+func acquireSessionLock(ctx context.Context, cfg Config) (func() error, error) {
+	if cfg.DB == nil {
+		lock, err := acquireLock(filepath.Join(cfg.DataDir, ".lock"))
+		if err != nil {
+			return nil, err
+		}
+		return lock.release, nil
+	}
+	var schema string
+	if err := cfg.DB.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		return nil, fmt.Errorf("resolve session schema: %w", err)
+	}
+	lock, err := pgdb.TryLock(ctx, cfg.DB, "whatsapp-mcp/session/"+schema)
+	if err != nil {
+		if errors.Is(err, pgdb.ErrLockHeld) {
+			return nil, fmt.Errorf("%w: %v", ErrLockHeld, err)
+		}
+		return nil, err
+	}
+	return lock.Release, nil
 }
 
 func sessionDSN(dir string) string {

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache/cachetest"
+
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	mcpclienttransport "github.com/mark3labs/mcp-go/client/transport"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -383,11 +385,7 @@ func newHarnessWithDeps(t *testing.T, paired bool, seed func(*cache.Store), mock
 	// Each harness opens its own cache DB in a per-test temp dir. The
 	// in-memory DSN uses cache=shared which would collide across parallel
 	// tests.
-	store, err := cache.Open(ctx, t.TempDir())
-	if err != nil {
-		cancel()
-		t.Fatalf("cache open: %v", err)
-	}
+	store := cachetest.Open(t)
 	if seed != nil {
 		seed(store)
 	}

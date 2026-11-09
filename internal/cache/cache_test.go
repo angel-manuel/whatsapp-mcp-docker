@@ -2,16 +2,28 @@ package cache
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
-	"time"
+
+	"go.mau.fi/util/dbutil"
+
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/pgdb/pgtest"
 )
 
+// newTestStore returns an empty, migrated store: a file-backed SQLite cache,
+// or a throwaway Postgres schema when TEST_DATABASE_URL is set.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	ctx := context.Background()
-	dir := t.TempDir()
-	store, err := Open(ctx, dir)
+	if pgtest.Enabled() {
+		store, err := OpenWithDB(ctx, pgtest.Schema(t), dbutil.Postgres)
+		if err != nil {
+			t.Fatalf("OpenWithDB: %v", err)
+		}
+		return store
+	}
+	store, err := Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -46,8 +58,8 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentSchemaVersion after Open: %v", err)
 	}
-	if v1 == 0 {
-		t.Fatalf("expected schema to be migrated after Open")
+	if v1 != len(upgradeTable) {
+		t.Fatalf("schema version after Open = %d, want %d", v1, len(upgradeTable))
 	}
 
 	// Re-running Migrate on an already-migrated db must be a no-op.
@@ -63,70 +75,14 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 	}
 }
 
-func TestMigrateDown_ThenUp(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-
-	startVersion, err := store.CurrentSchemaVersion(ctx)
-	if err != nil {
-		t.Fatalf("CurrentSchemaVersion: %v", err)
-	}
-	if startVersion == 0 {
-		t.Fatalf("expected at least one migration applied")
-	}
-
-	// Rolling all the way down must drop every managed table.
-	if err := store.MigrateDown(ctx, 0); err != nil {
-		t.Fatalf("MigrateDown(0): %v", err)
-	}
-	v, err := store.CurrentSchemaVersion(ctx)
-	if err != nil {
-		t.Fatalf("CurrentSchemaVersion after down: %v", err)
-	}
-	if v != 0 {
-		t.Fatalf("schema version after full down = %d, want 0", v)
-	}
-
-	// MigrateDown again is a no-op — nothing left to revert.
-	if err := store.MigrateDown(ctx, 0); err != nil {
-		t.Fatalf("MigrateDown(0) second call: %v", err)
-	}
-
-	// Reapply from scratch and confirm we're back at the baseline.
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("re-Migrate after full down: %v", err)
-	}
-	v2, err := store.CurrentSchemaVersion(ctx)
-	if err != nil {
-		t.Fatalf("CurrentSchemaVersion after re-up: %v", err)
-	}
-	if v2 != startVersion {
-		t.Fatalf("schema version after re-up = %d, want %d", v2, startVersion)
-	}
-
-	// And the tables should actually exist after re-up.
-	var count int
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('chats','messages','contacts','nicknames','messages_fts')`).
-		Scan(&count); err != nil {
-		t.Fatalf("count tables: %v", err)
-	}
-	if count != 5 {
-		t.Fatalf("expected 5 tables after re-up, got %d", count)
-	}
-}
-
-func TestMigrate_ReopenPreservesSchema(t *testing.T) {
+func TestMigrate_ReopenPreservesData(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store, err := Open(ctx, dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	v1, err := store.CurrentSchemaVersion(ctx)
-	if err != nil {
-		t.Fatalf("CurrentSchemaVersion: %v", err)
-	}
+	mustExec(t, store, `INSERT INTO chats (jid, name) VALUES ('c@s', 'kept')`)
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -136,30 +92,91 @@ func TestMigrate_ReopenPreservesSchema(t *testing.T) {
 		t.Fatalf("re-Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store2.Close() })
-	v2, err := store2.CurrentSchemaVersion(ctx)
-	if err != nil {
-		t.Fatalf("CurrentSchemaVersion after reopen: %v", err)
-	}
-	if v1 != v2 {
-		t.Fatalf("version drift on reopen: %d -> %d", v1, v2)
+	if got, err := store2.GetChatNameByJID(ctx, "c@s"); err != nil || got != "kept" {
+		t.Fatalf("ChatName after reopen = %q, %v; want kept", got, err)
 	}
 }
 
-func TestFTS5_AvailableAndSearchable(t *testing.T) {
+// TestMigrate_DropsLegacySchema covers a cache.db written by the pre-dbutil
+// migration system: it is dropped and rebuilt empty rather than upgraded.
+func TestMigrate_DropsLegacySchema(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+
+	legacy, err := openRaw(path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE _schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER)`,
+		`INSERT INTO _schema_version (version) VALUES (7)`,
+		`CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO chats (jid, name) VALUES ('old@s', 'stale')`,
+	} {
+		if _, err := legacy.ExecContext(ctx, q); err != nil {
+			t.Fatalf("seed legacy %q: %v", q, err)
+		}
+	}
+	_ = legacy.Close()
+
+	store, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("Open over legacy cache: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var n int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM chats`).Scan(&n); err != nil {
+		t.Fatalf("count chats: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("legacy rows survived: %d chats", n)
+	}
+	if exists, err := store.dbu.TableExists(ctx, "_schema_version"); err != nil || exists {
+		t.Fatalf("_schema_version still present (exists=%v, err=%v)", exists, err)
+	}
+}
+
+func TestFullTextSearchSchema(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 
 	mustExec(t, store, `INSERT INTO messages (chat_jid, id, ts, body) VALUES ('c@s', 'm1', 1, 'hello world')`)
 	mustExec(t, store, `INSERT INTO messages (chat_jid, id, ts, body) VALUES ('c@s', 'm2', 2, 'unrelated text')`)
 
+	q := `SELECT m.id FROM messages_fts f JOIN messages m ON m.rowid = f.rowid WHERE f.body MATCH 'hello'`
+	if store.Dialect() == dbutil.Postgres {
+		q = `SELECT id FROM messages WHERE body_tsv @@ phraseto_tsquery('simple', 'hello')`
+	}
 	var got string
-	err := store.DB().QueryRowContext(ctx,
-		`SELECT m.id FROM messages_fts f JOIN messages m ON m.rowid = f.rowid WHERE f.body MATCH 'hello'`).Scan(&got)
-	if err != nil {
+	if err := store.DB().QueryRowContext(ctx, q).Scan(&got); err != nil {
 		t.Fatalf("fts query: %v", err)
 	}
 	if got != "m1" {
 		t.Fatalf("fts match id = %q, want m1", got)
+	}
+}
+
+func TestRebind(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`SELECT 1`, `SELECT 1`},
+		{`a = ? AND b = ?`, `a = $1 AND b = $2`},
+		{`x LIKE '?%' AND y = ?`, `x LIKE '?%' AND y = $1`},
+		{`'it''s ?' = ?`, `'it''s ?' = $1`},
+		{`"we?ird" = ?`, `"we?ird" = $1`},
+		{"-- why?\nx = ?", "-- why?\nx = $1"},
+		{`/* ? */ x = ?`, `/* ? */ x = $1`},
+		{`ESCAPE '\' AND z = ?`, `ESCAPE '\' AND z = $1`},
+		{`unterminated '?`, `unterminated '?`},
+	}
+	for _, c := range cases {
+		if got := rebind(dbutil.Postgres, c.in); got != c.want {
+			t.Errorf("rebind(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if got := rebind(dbutil.SQLite, c.in); got != c.in {
+			t.Errorf("SQLite rebind(%q) changed the query to %q", c.in, got)
+		}
 	}
 }
 
@@ -170,50 +187,7 @@ func mustExec(t *testing.T, store *Store, query string, args ...any) {
 	}
 }
 
-// TestMigrate_ReactionsUpgradeFromPre005 covers the upgrade path a deployed
-// cache.db actually takes: it already holds data at version 4 and gains the
-// reactions table on the next start.
-func TestMigrate_ReactionsUpgradeFromPre005(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-
-	tableCount := func() int {
-		t.Helper()
-		var n int
-		if err := store.DB().QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reactions'`).Scan(&n); err != nil {
-			t.Fatalf("count reactions table: %v", err)
-		}
-		return n
-	}
-
-	if tableCount() != 1 {
-		t.Fatal("reactions table missing at head")
-	}
-
-	if err := store.MigrateDown(ctx, 4); err != nil {
-		t.Fatalf("MigrateDown(4): %v", err)
-	}
-	if tableCount() != 0 {
-		t.Fatal("reactions table survived the down migration")
-	}
-
-	// Pre-existing data at v4 must not block the upgrade.
-	if err := store.InsertMessage(ctx, Message{
-		ID: "m1", ChatJID: "c@s", SenderJID: "u@s", Timestamp: time.Unix(1_700_000_000, 0), Kind: KindText, Body: "hi",
-	}); err != nil {
-		t.Fatalf("insert at v4: %v", err)
-	}
-
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("re-Migrate to head: %v", err)
-	}
-	if tableCount() != 1 {
-		t.Fatal("reactions table not recreated by the up migration")
-	}
-	if err := store.UpsertReaction(ctx, Reaction{
-		ChatJID: "c@s", TargetID: "m1", SenderJID: "u@s", Emoji: "👍", Timestamp: time.Unix(1_700_000_100, 0),
-	}); err != nil {
-		t.Fatalf("upsert after upgrade: %v", err)
-	}
+// openRaw opens a SQLite file without running any migrations.
+func openRaw(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", buildDSN(path))
 }

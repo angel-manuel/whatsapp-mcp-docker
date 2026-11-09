@@ -1,11 +1,15 @@
 package sessions
 
 import (
+	"go.mau.fi/util/dbutil"
+
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -15,6 +19,7 @@ import (
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcptools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/media"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/pgdb"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/tools"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
@@ -62,8 +67,18 @@ type Options struct {
 	MediaSweepInterval  time.Duration
 	MediaMaxUploadBytes int64
 
+	// DatabaseURL, when set, puts the session's whatsmeow store and cache
+	// in Postgres (schema pgdb.SessionSchema(id)) instead of SQLite files
+	// in its directory. Media stays in the directory either way.
+	DatabaseURL string
+
 	Logger *slog.Logger
 }
+
+// sessionPoolSize bounds each session's Postgres pool. One connection is
+// pinned for the session's advisory lock for as long as it is open; the
+// rest serve whatsmeow and the cache.
+const sessionPoolSize = 5
 
 // Session is one WhatsApp account: a whatsmeow client, its cache, its media
 // store and its MCP server, all rooted in one directory.
@@ -75,6 +90,7 @@ type Session struct {
 	cancel      context.CancelFunc
 	sweeperDone chan struct{}
 
+	db      *sql.DB // Postgres pool, nil on SQLite
 	cache   *cache.Store
 	wa      *wa.Client
 	mcp     *mcp.Server
@@ -103,7 +119,18 @@ func Open(id, dir string, opts Options) (_ *Session, err error) {
 	// Cache migrations are schema-only; Open either succeeds or fails on
 	// its own terms. Opened before wa so the ingestor is wired into the wa
 	// EventHook from the very first whatsmeow event.
-	if s.cache, err = cache.Open(ctx, dir); err != nil {
+	if err = os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create session dir: %w", err)
+	}
+	if opts.DatabaseURL != "" {
+		if s.db, err = pgdb.Open(ctx, opts.DatabaseURL, pgdb.SessionSchema(id), sessionPoolSize); err != nil {
+			return nil, fmt.Errorf("database open: %w", err)
+		}
+		s.cache, err = cache.OpenWithDB(ctx, s.db, dbutil.Postgres)
+	} else {
+		s.cache, err = cache.Open(ctx, dir)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("cache open: %w", err)
 	}
 
@@ -119,6 +146,7 @@ func Open(id, dir string, opts Options) (_ *Session, err error) {
 	// dropped, leaving a socket that dies with no trace in the logs.
 	if s.wa, err = wa.Open(ctx, wa.Config{
 		DataDir:        dir,
+		DB:             s.db,
 		PairDeviceName: opts.PairDeviceName,
 		EventHook:      ingestor.HandleEvent,
 		DeferConnect:   true,
@@ -234,6 +262,13 @@ func (s *Session) Close() error {
 	if s.cache != nil {
 		if err := s.cache.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("cache close: %w", err))
+		}
+	}
+	// Last: whatsmeow and the cache both borrow this pool, and closing it
+	// also drops the session's advisory lock.
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("database close: %w", err))
 		}
 	}
 	return errors.Join(errs...)

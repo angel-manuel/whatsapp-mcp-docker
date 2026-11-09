@@ -34,7 +34,7 @@ ON CONFLICT(jid) DO UPDATE SET
     name            = CASE WHEN excluded.name != '' THEN excluded.name ELSE chats.name END,
     is_group        = excluded.is_group,
     chat_type       = CASE WHEN ? != '' THEN excluded.chat_type ELSE chats.chat_type END,
-    last_message_ts = MAX(chats.last_message_ts, excluded.last_message_ts),
+    last_message_ts = CASE WHEN excluded.last_message_ts > chats.last_message_ts THEN excluded.last_message_ts ELSE chats.last_message_ts END,
     unread_count    = excluded.unread_count,
     archived        = excluded.archived,
     pinned          = excluded.pinned,

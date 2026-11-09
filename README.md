@@ -159,7 +159,8 @@ Most operators only touch these:
 | `PORT` | `8081` | Serves `/mcp`, `/media` (upload), `/media/<sha256>` (download), `/sessions` and `/healthz`. |
 | `DATA_DIR` | `/data` | The only writable volume. Holds `sessions.db` (session ids → token hashes) and `sessions/<id>/`, one directory per session with its `session.db` (whatsmeow identity), `cache.db` (chat/message cache) and `media/` (attachment blobs). |
 | `ADMIN_TOKEN` | *(unset)* | Bearer token for the `/sessions` admin API. **Unset leaves that API anonymous** (a warning is logged): restrict it at the ingress. Session tokens always gate `/mcp` and `/media`. |
-| `MAX_SESSIONS` | `20` | Cap on hosted sessions. Each holds a live WhatsApp socket and its own SQLite handles. |
+| `MAX_SESSIONS` | `20` | Cap on hosted sessions. Each holds a live WhatsApp socket and its own database handles. |
+| `DATABASE_URL` | *(unset)* | `postgres://…` moves the session registry, every session's WhatsApp identity and its cache into Postgres, one schema per session. Unset keeps everything in SQLite files under `DATA_DIR`. Media stays under `DATA_DIR` either way. See [Postgres](#postgres). |
 | `STDIO_SESSION` | `default` | The one session served when `TRANSPORT=stdio`. Created on first start. |
 | `AUTH_TOKEN` | — | **Removed.** Setting it is a fatal startup error; see [Upgrading from 0.7](#upgrading-from-07). |
 | `MTLS_CA_FILE` / `MTLS_CERT_FILE` / `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them is a fatal startup error — there is no TLS listener, so they only ever served plaintext. Terminate TLS in a reverse proxy. |
@@ -180,6 +181,48 @@ path, not via `-e` — `-e` exposes the secret to anyone who can read
 
 The server speaks plaintext HTTP and authenticates with a bearer token only.
 Transport encryption and client-certificate auth are the reverse proxy's job.
+
+## Postgres
+
+By default everything lives in SQLite files on the `/data` volume. Set
+`DATABASE_URL` to keep the databases in Postgres instead:
+
+```sh
+docker run -d --name whatsapp-mcp \
+  -p 127.0.0.1:8081:8081 \
+  -v whatsapp-mcp-data:/data \
+  -e ADMIN_TOKEN="$(cat ~/whatsapp-mcp/.admin_token)" \
+  -e DATABASE_URL='postgres://wamcp:secret@db:5432/wamcp?sslmode=require' \
+  angelmanuel/whatsapp-mcp:latest
+```
+
+Layout in that database:
+
+| Schema | Holds |
+|---|---|
+| `whatsapp_mcp` | The session registry (`sessions`: id → token hash). |
+| `wa_<id>` | One per session: whatsmeow's `whatsmeow_*` tables (the linked device's keys) and the cache (`chats`, `messages`, …). Ids too long for a Postgres identifier are shortened and suffixed with a hash. |
+
+- **`/data` is still needed** for media (`/data/sessions/<id>/media`).
+- **`DELETE /sessions/{id}`** drops the session's schema and its media directory.
+- **One process per database.** Besides the `/data` flock, the server takes a
+  Postgres advisory lock at startup, and another per session, so two containers
+  pointed at the same database cannot both drive a session (that would corrupt
+  its ratchets). The second one exits with `lock database: another whatsapp-mcp
+  process is using this DATABASE_URL`.
+- **Connections:** each open session keeps a pool of up to 5 (one is pinned
+  for its lock), plus 3 for the registry and server lock. Budget about
+  `5 × MAX_SESSIONS + 3`.
+- **pgbouncer** must run in *session* pooling mode: each session's pool sets
+  `search_path` as a startup parameter, which transaction pooling does not
+  carry.
+- **The role needs `CREATE` on the database** to create schemas.
+- **Search** uses a generated `tsvector` column (`simple` configuration)
+  instead of SQLite's FTS5. A `list_messages` query matches its words as a
+  phrase on both backends; tokenisation details differ at the edges.
+- There is no SQLite → Postgres copy tool. Switching backends means
+  re-pairing; the cache rebuilds itself from WhatsApp's history sync and
+  `cache_sync`.
 
 ## Media
 
@@ -356,7 +399,8 @@ Full pairing contract — events, error codes — is in
 - **One process per `/data` volume.** Ratchet state rotates on every
   message; the binary acquires an exclusive `flock` on `/data/.lock` (and
   each session on `/data/sessions/<id>/.lock`) at startup and exits non-zero
-  if another process owns it.
+  if another process owns it. With `DATABASE_URL` set, Postgres advisory
+  locks play the same role per database and per session.
 - **`/data` is the only persistent volume.** `DELETE /sessions/{id}` resets
   one session; `docker volume rm whatsapp-mcp-data` resets them all.
   Preserve the volume across container restarts to avoid re-pairing.

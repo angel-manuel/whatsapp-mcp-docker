@@ -1,6 +1,8 @@
 package mcptools
 
 import (
+	"go.mau.fi/util/dbutil"
+
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -45,7 +47,7 @@ var listMessagesInputSchema = json.RawMessage(`{
   "properties": {
     "chat_jid":   {"type": ["string","null"], "description": "Restrict to one chat key (a chat's JID). Distinct from contact_jid/sender_jid."},
     "sender_jid": {"type": ["string","null"], "description": "Restrict to messages authored by this JID."},
-    "query":      {"type": ["string","null"], "description": "The search argument (named 'query', NOT 'search'). Full-text search across message bodies (FTS5 when set; LIKE fallback handled server-side)."},
+    "query":      {"type": ["string","null"], "description": "The search argument (named 'query', NOT 'search'). Full-text phrase search across message bodies (full-text index when set; LIKE fallback handled server-side)."},
     "after":      {"type": ["string","null"], "description": "ISO-8601 timestamp (a date/time string, NOT a count); only messages strictly after this are returned."},
     "before":     {"type": ["string","null"], "description": "ISO-8601 timestamp (a date/time string, NOT a count); only messages strictly before this are returned."},
     "limit":      {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
@@ -91,7 +93,7 @@ type listMessagesOutput struct {
 // Intended tool description (verbatim):
 //
 //	List cached WhatsApp messages. Supports filtering by chat, sender,
-//	full-text body search (FTS5 when `query` is set), and timestamp range.
+//	full-text body search (a full-text index when `query` is set), and timestamp range.
 //	is_from_me reflects the sending account/device, not the speaker's role.
 //	With multi-device or business accounts the same person can send from
 //	multiple JIDs, and an operator controlling both ends sees their own JID
@@ -105,7 +107,7 @@ func registerListMessages(reg *mcp.Registry, store *cache.Store) error {
 	return reg.Register(mcp.Tool{
 		Name: "list_messages",
 		Description: "List cached WhatsApp messages. Supports filtering by chat, sender, " +
-			"full-text body search (FTS5 when `query` is set), and timestamp range. " +
+			"full-text body search (a full-text index when `query` is set), and timestamp range. " +
 			"is_from_me reflects the sending account/device, not the speaker's role. " +
 			"With multi-device or business accounts the same person can send from multiple JIDs, " +
 			"and an operator controlling both ends sees their own JID on both sides. " +
@@ -165,7 +167,15 @@ func handleListMessages(ctx context.Context, store *cache.Store, in listMessages
 	}
 
 	var fromClause string
-	if in.Query != nil && *in.Query != "" {
+	if in.Query != nil && *in.Query != "" && store.Dialect() == dbutil.Postgres {
+		// Postgres path: the generated body_tsv column. phraseto_tsquery
+		// matches the words in order, like the FTS5 phrase below.
+		fromClause = `
+FROM messages m
+LEFT JOIN chats c ON c.jid = m.chat_jid` + messageContactJoins
+		wheres = append(wheres, "m.body_tsv @@ phraseto_tsquery('simple', ?)")
+		params = append(params, *in.Query)
+	} else if in.Query != nil && *in.Query != "" {
 		// FTS5 path: join messages_fts on rowid.
 		fromClause = `
 FROM messages m
