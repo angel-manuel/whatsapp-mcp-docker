@@ -144,7 +144,10 @@ func TestRun_LogsStartAndStopEvents(t *testing.T) {
 	cancel()
 
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v after cancel, want nil", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
@@ -179,7 +182,9 @@ func TestRun_HTTPRefusesSecondProcessOnSameDataDir(t *testing.T) {
 	go func() { done <- mk(port).Run(ctx) }()
 	defer func() {
 		cancel()
-		<-done
+		if err := <-done; err != nil {
+			t.Errorf("first Run returned %v after cancel, want nil", err)
+		}
 	}()
 
 	// Wait until the first server is serving, i.e. holds the lock.
@@ -217,7 +222,9 @@ func TestRun_WarnsAboutLegacyLayout(t *testing.T) {
 	go func() { done <- srv.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned %v after cancel, want nil", err)
+	}
 	if out := buf.String(); !strings.Contains(out, "server.legacy_layout") || !strings.Contains(out, "POST /sessions") {
 		t.Fatalf("no migration warning in log:\n%s", out)
 	}

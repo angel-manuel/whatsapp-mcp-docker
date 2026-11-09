@@ -10,8 +10,11 @@
 # ARG-built tag silently opts this image out of automated updates. Nothing
 # passed --build-arg GO_VERSION, so the indirection bought nothing.
 #
-# Keep the major.minor in step with the `go` directive in go.mod.
-FROM golang:1.27-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS builder
+# Keep the major.minor in step with the `go` directive in go.mod, and the
+# `toolchain` line there at this image's patch release: the dependency
+# audit scans the stdlib version it names, so a stale line hides advisories
+# against the Go that actually ships (or flags ones already fixed).
+FROM golang:1.27-bookworm@sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0 AS builder
 
 WORKDIR /src
 

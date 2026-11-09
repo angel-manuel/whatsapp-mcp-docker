@@ -214,7 +214,8 @@ func (s *Server) runHTTP(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
-	<-errCh
 	applog.WithEvent(s.log, "mcp.stop").Info("http server stopped")
-	return nil
+	// Serve reports ErrServerClosed (sent as nil) after Shutdown; anything
+	// else is a real failure that raced the cancellation.
+	return <-errCh
 }
