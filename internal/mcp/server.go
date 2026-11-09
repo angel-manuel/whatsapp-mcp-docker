@@ -335,8 +335,9 @@ func (s *Server) runHTTP(ctx context.Context, core *mcpserver.MCPServer) error {
 		defer cancel()
 		_ = httpSrv.Shutdown(shutdownCtx)
 		applog.WithEvent(s.log, "mcp.stop").Info("mcp http server stopped")
-		<-errCh
-		return nil
+		// Serve reports ErrServerClosed (sent as nil) after Shutdown; anything
+		// else is a real failure that raced the cancellation.
+		return <-errCh
 	case err := <-errCh:
 		applog.WithEvent(s.log, "mcp.stop").Info("mcp http server stopped")
 		return err

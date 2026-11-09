@@ -1,0 +1,110 @@
+# Dependency vulnerability scanning.
+#
+# Two entry points, one set of jobs:
+#
+#   * workflow_call — from ci.yml, on any PR / push that touches go.mod,
+#     go.sum or the scanner config (the `deps` paths filter there), so a PR
+#     that *introduces* a vulnerable dependency fails its checks.
+#   * schedule — advisories are published against versions we already ship,
+#     and no PR touches go.mod on the day it happens. Daily for the module
+#     scans; weekly for the published images. A scheduled failure opens (or
+#     bumps) a triage issue via deps-audit-report.yml.
+#
+# Gating PRs on changed paths rather than running this on every PR is
+# deliberate: a fresh advisory against an unchanged go.mod must not block
+# every unrelated merge — it gets triaged in the issue instead.
+name: Dependency audit
+
+on:
+  workflow_call:
+  schedule:
+    # 06:17 UTC daily — off the top of the hour, when scheduled runs queue
+    # longest. Module scans only.
+    - cron: "17 6 * * *"
+    # 06:47 UTC Mondays — published image scan only. The job conditions
+    # below compare github.event.schedule against this exact string.
+    - cron: "47 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # OSV aggregates the Go vulnerability database, GHSA and more, at every
+  # severity, and supports a justified, time-boxed ignore (osv-scanner.toml).
+  osv-scan:
+    name: OSV scan
+    if: github.event.schedule != '47 6 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          # --no-call-analysis: OSV's embedded govulncheck is compiled with
+          # whatever Go the action image ships, and fails outright on a module
+          # needing a newer one. The govulncheck job below does reachability
+          # with the right toolchain; this job stays a plain advisory match.
+          scan-args: |-
+            --config=osv-scanner.toml
+            --no-call-analysis=go
+            --lockfile=go.mod
+
+  # The Go team's own scanner. Stricter than OSV in one way and looser in
+  # another: it also checks the Go standard library of the toolchain we build
+  # with, and it only fails on vulnerabilities whose affected symbols are
+  # actually reachable from our code. No ignore list — a finding here is
+  # reachable by definition, so it is fixed, not excepted.
+  govulncheck:
+    name: govulncheck
+    if: github.event.schedule != '47 6 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # The `toolchain` line in go.mod, kept in step with the Dockerfile
+          # builder image, so the stdlib findings are the ones that ship.
+          go-version-file: go.mod
+          cache: true
+      # GOTOOLCHAIN=local: `go run pkg@version` otherwise builds govulncheck
+      # with the toolchain *its* go.mod asks for, and a govulncheck built with
+      # an older Go cannot load packages that need a newer one.
+      - name: govulncheck
+        env:
+          GOTOOLCHAIN: local
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  # The images users actually pull, as Docker Hub's own scanner (Docker Scout)
+  # sees them: base-image OS packages included, which neither scan above can
+  # see. Fixable high/critical only — the Debian base of the slim variant
+  # always carries unfixed CVEs with no action available, and those would
+  # make this permanently red. A fixable one means rebuilding on a newer base
+  # (Dependabot's docker entry) and cutting a release.
+  #
+  # Exceptions are OpenVEX statements in .github/vex/, each with a
+  # justification; review them at least every 90 days.
+  #
+  # Weekly and on dispatch only; never from ci.yml (a PR does not change
+  # what is published). Scans the linux/amd64 image; arm64 is built from the
+  # same base tags.
+  image-scan:
+    name: Image scan (${{ matrix.tag }})
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '47 6 * * 1'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [latest, latest-slim]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/scout-action@e7e2a72bf1485d10a58f30696b6c513b261ce4fa # v1.29.0
+        with:
+          command: cves
+          image: registry://docker.io/angelmanuel/whatsapp-mcp:${{ matrix.tag }}
+          platform: linux/amd64
+          only-fixed: true
+          only-severities: critical,high
+          vex-location: .github/vex
+          exit-code: true
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
