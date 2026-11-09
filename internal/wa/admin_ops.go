@@ -60,6 +60,10 @@ func (s *pairSession) markDone() {
 	s.obsMu.Unlock()
 }
 
+// devicePropsMu guards whatsmeow's package-level store.DeviceProps across
+// every Client in the process. See StartPairing.
+var devicePropsMu sync.Mutex
+
 // StartPairing opens a whatsmeow QR channel, connects the client, and returns
 // a channel of typed PairEvents. The caller must cancel ctx (or drain the
 // channel until it closes) to release resources. Only one pair flow may be
@@ -88,12 +92,17 @@ func (c *Client) StartPairing(ctx context.Context, deviceName string) (<-chan Pa
 	}
 
 	// Apply device name cascade: configured default → per-call override.
-	// adminMu serializes StartPairing calls so mutating the package-level
-	// store.DeviceProps is safe here.
+	// store.DeviceProps is a whatsmeow package global, read when the
+	// registration payload is marshalled during wm.Connect's handshake.
+	// adminMu only serializes this Client; with several sessions in one
+	// process, devicePropsMu must be held from the write until Connect has
+	// returned, or a concurrent pairing could ship the other's label.
 	effectiveName := c.cfg.PairDeviceName
 	if deviceName != "" {
 		effectiveName = deviceName
 	}
+	devicePropsMu.Lock()
+	defer devicePropsMu.Unlock()
 	store.DeviceProps.Os = &effectiveName
 
 	// GetQRChannel must be called before Connect and requires that the
@@ -298,4 +307,30 @@ func toPairEvent(item whatsmeow.QRChannelItem) PairEvent {
 		}
 		return PairEvent{Type: PairEventError, Error: msg}
 	}
+}
+
+// Logout unlinks this device from the user's phone, best-effort. It needs a
+// live, authenticated socket: an offline client returns
+// whatsmeow.ErrNotLoggedIn and the device stays listed under the phone's
+// Linked devices until the user removes it there. Unlike Unpair it does not
+// reopen anything — it is the first step of permanently deleting a session,
+// after which the caller closes the Client and removes its data dir.
+func (c *Client) Logout(ctx context.Context) error {
+	c.adminMu.Lock()
+	defer c.adminMu.Unlock()
+
+	c.mu.Lock()
+	wm := c.wm
+	c.mu.Unlock()
+	if wm == nil || !wm.IsLoggedIn() {
+		return whatsmeow.ErrNotLoggedIn
+	}
+	// whatsmeow's Logout emits no LoggedOut event; suppress auto-reconnect
+	// ourselves so the socket it tears down is not redialled.
+	c.stopReconnect.Store(true)
+	if err := wm.Logout(ctx); err != nil {
+		c.stopReconnect.Store(false)
+		return err
+	}
+	return nil
 }

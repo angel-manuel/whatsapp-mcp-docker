@@ -10,10 +10,23 @@ A single-container, Go-native [Model Context Protocol](https://modelcontextproto
 
 Design-wise the container is also intended to be safely embeddable behind an external approval/permission/auth layer that proxies MCP tool calls — it should not assume it is the security boundary.
 
+## Multi-session
+
+One process hosts up to `MAX_SESSIONS` WhatsApp sessions. A session is one linked phone with its own bearer token and its own directory, `$DATA_DIR/sessions/<id>/`, holding `session.db`, `cache.db` and `media/`. Nothing a session stores is reachable through another session's token.
+
+- `POST /sessions {"id"}` → `201 {"id","token","adopted"}`. The token is returned once; the server persists only its SHA-256 (in `$DATA_DIR/sessions.db`). An existing directory for that id is adopted, which is the migration path from the single-session layout.
+- `DELETE /sessions/{id}` → best-effort unlink from the phone, then wipe the session's directory. The token stops resolving before teardown starts.
+- `GET /sessions` → each session's id, `created_at` and status: `unpaired`, `connected`, `disconnected`, `logged_out`, or `error` (failed to open at startup).
+- `/mcp` and `/media`: `Authorization: Bearer <session token>` authenticates the request and selects the session. Unknown token → `401`.
+- The admin API requires `ADMIN_TOKEN` when it is set and is anonymous when it is not. It is defence in depth behind the ingress, which is expected to restrict `/sessions`.
+- Every paired session stays connected so its cache keeps receiving messages.
+- Stdio mode serves exactly one session, `STDIO_SESSION`, without an admin API or token.
+
+Out of scope for now: encrypting each session's whatsmeow rows with a key derived from its token. That would protect sessions that are not connected when a disk is stolen, but not live ones, which need the key in memory to receive messages.
+
 ## Non-goals
 
 - Web dashboard bundled inside the container (pair flow is programmatic; any UI lives upstream).
-- Multi-account multiplexing inside one process (one instance = one WhatsApp account; run N containers for N accounts).
 - Full historical message export (bounded by what WhatsApp's multidevice sync delivers).
 - Broadcast lists, voice/video calls.
 - Coupling to any specific deployment target (compose, Kubernetes, systemd, local dev all must work).
@@ -187,21 +200,24 @@ When `logged_out` or `stream_replaced` fires, the process MUST NOT silently try 
 |---|---|---|
 | `TRANSPORT` | `http` | `http` or `stdio` |
 | `BIND_ADDR` | `0.0.0.0` | HTTP bind address |
-| `PORT` | `8081` | Serves `/mcp`, `POST /media` and `GET /media/{sha256}` |
-| `DATA_DIR` | `/data` | Persistent state dir (`session.db`, `cache.db`, `media/`) |
+| `PORT` | `8081` | Serves `/mcp`, `POST /media`, `GET /media/{sha256}`, `/sessions` and `/healthz` |
+| `DATA_DIR` | `/data` | Persistent state dir: `sessions.db` (id → token hash) and `sessions/<id>/` (`session.db`, `cache.db`, `media/`) per session |
 | `LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
-| `AUTH_TOKEN` | *(unset)* | Required bearer token for every HTTP route (`/mcp` and `/media/`). REQUIRED in `http` mode. |
-| `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them in `http` mode is a fatal startup error. No TLS listener exists, so they never encrypted anything or verified a client certificate. If mTLS is ever built, it will be additive to `AUTH_TOKEN`, never a replacement. |
+| `ADMIN_TOKEN` | *(unset)* | Bearer token for the `/sessions` admin API. Unset → the admin API is anonymous (logged as a warning). |
+| `MAX_SESSIONS` | `20` | Cap on hosted sessions. `POST /sessions` beyond it → `409 session_limit`. |
+| `STDIO_SESSION` | `default` | The single session served in `stdio` mode. |
+| `AUTH_TOKEN` | — | Removed. Setting it is a fatal startup error pointing at the migration steps in README.md. |
+| `MTLS_CA_FILE`, `MTLS_CERT_FILE`, `MTLS_KEY_FILE` | *(unset)* | **Not implemented.** Setting any of them in `http` mode is a fatal startup error. No TLS listener exists, so they never encrypted anything or verified a client certificate. If mTLS is ever built, it will be additive to bearer tokens, never a replacement. |
 | `WHATSAPP_DEVICE_NAME` | `whatsapp-mcp` | Shown on the user's phone after pairing. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | ffmpeg binary used to transcode audio to Opus for `send_audio_message` (and for `send_file` audio WhatsApp cannot play). Probed per call, not at startup, so an ffmpeg bind-mounted into a running container is picked up without a restart. Present → arbitrary input is transcoded; absent → Opus input is required and anything else is refused with `invalid_argument`, never sent unplayable. |
 | `ENABLE_PPROF` | `false` | Exposes `/debug/pprof` when true. |
-| `MEDIA_MAX_BYTES` | `1073741824` | Cap on `$DATA_DIR/media`. Over the cap, least-recently-requested blobs are evicted. `0` = unlimited. |
+| `MEDIA_MAX_BYTES` | `1073741824` | Cap on each session's `media/` directory. Over the cap, least-recently-requested blobs are evicted. `0` = unlimited. |
 | `MEDIA_TTL` | *(unset)* | Go duration; evicts media older than this. Unset/`0` disables age-based eviction. |
 | `MEDIA_SWEEP_INTERVAL` | `1h` | Retention sweep period. A sweep also runs at startup. |
 | `MEDIA_MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Largest single `POST /media` body. A hard refusal (`413`), not an eviction trigger: it bounds what one request can push onto the volume between sweeps. |
 
-No long-lived secrets in env vars in production: operators should deliver `AUTH_TOKEN` via a secret store mount (tmpfs file + `file://` reference) rather than `-e`.
+No long-lived secrets in env vars in production: operators should deliver `ADMIN_TOKEN` via a secret store mount (tmpfs file + `file://` reference) rather than `-e`.
 
 ## Security posture
 
@@ -211,8 +227,8 @@ No long-lived secrets in env vars in production: operators should deliver `AUTH_
 - **Minimal base image.** Distroless static or `debian:bookworm-slim` — decision documented in `docs/image.md`. No shell in the distroless variant.
 - **Signed images.** Releases pushed to `ghcr.io/angel-manuel/whatsapp-mcp-docker` and signed with [`cosign`](https://github.com/sigstore/cosign). Consumers pin by digest.
 - **Reproducible-ish builds.** `go build -trimpath -buildvcs=false` + pinned base image digests; goal is byte-identical rebuilds from the same commit.
-- **Mandatory auth on HTTP.** Starting in `http` mode without `AUTH_TOKEN` is a fatal error at startup. The bearer check rejects every request when the configured token is empty, rather than accepting an empty one.
-- **TLS terminates upstream.** The listener is plaintext HTTP; the bearer token is the only auth this process enforces. Operators needing transport encryption or client-certificate auth must front it with a reverse proxy. Config that claims otherwise fails closed at startup rather than serving plaintext under an mTLS-shaped name.
+- **Session tokens on HTTP.** `/mcp` and `/media` always require a session token: 32 random bytes, base64url. Only its SHA-256 is stored, so a copy of the volume does not yield usable tokens. A malformed or unknown token is `401`. `ADMIN_TOKEN` is compared in constant time.
+- **TLS terminates upstream.** The listener is plaintext HTTP; bearer tokens are the only auth this process enforces. Operators needing transport encryption or client-certificate auth must front it with a reverse proxy. Config that claims otherwise fails closed at startup rather than serving plaintext under an mTLS-shaped name.
 - **Outbound egress.** The process only needs to reach WhatsApp endpoints; operators running under a strict egress policy should allow at minimum:
   - `*.whatsapp.net`
   - `web.whatsapp.com`
@@ -223,7 +239,7 @@ No long-lived secrets in env vars in production: operators should deliver `AUTH_
 ## Observability
 
 - Structured JSON logs to stdout; one event per line; includes `connection_id` (if passed via env) and a stable `event_type`.
-- `GET /healthz` — unauthenticated probe; drives the container HEALTHCHECK via `whatsapp-mcp --healthcheck`. It reports WhatsApp readiness, not merely that the HTTP server routes: `200 {"status":"ok"}` when paired and connected, `200 {"status":"awaiting_pairing"}` when unpaired (waiting on a human to scan is not a fault, and the endpoint must stay reachable for the pairing tools), `503 {"status":"disconnected"}` when paired but the socket is down. The body carries a coarse status string only — never a JID, phone number or push name — since this is the sole route outside the bearer gate.
+- `GET /healthz` — unauthenticated probe; drives the container HEALTHCHECK via `whatsapp-mcp --healthcheck`. Always `200` while the server is up — with many sessions, one phone going offline must not fail the whole container — with per-status session counts: `{"status":"ok","sessions":{"connected":2,"unpaired":1}}`. Never an id, JID, phone number or push name, since this is the only route outside every auth gate. Per-session state is `GET /sessions`.
 - `ping` (MCP tool) — readiness: liveness + `paired` and `connected` reported separately. Exempt from the readiness gate, so it answers before the device is linked and while it is offline.
 - whatsmeow's own logs MUST be routed into the application logger. Leaving them at `waLog.Noop` discards the entire connection lifecycle — reconnect attempts, connect failures, stream errors — which makes a socket that dies and never recovers impossible to diagnose after the fact.
 - `cache_sync_status` (MCP tool) — cache counts, last ingested event, current/most-recent sync run.

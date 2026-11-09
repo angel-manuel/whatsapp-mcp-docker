@@ -10,7 +10,8 @@ import (
 // setting only what it wants, so tests do not leak values across cases.
 var allVars = []string{
 	"TRANSPORT", "BIND_ADDR", "PORT", "DATA_DIR",
-	"LOG_LEVEL", "LOG_FORMAT", "AUTH_TOKEN",
+	"LOG_LEVEL", "LOG_FORMAT", "AUTH_TOKEN", "ADMIN_TOKEN",
+	"MAX_SESSIONS", "STDIO_SESSION",
 	"MTLS_CA_FILE", "MTLS_CERT_FILE", "MTLS_KEY_FILE",
 	"WHATSAPP_DEVICE_NAME", "FFMPEG_PATH", "ENABLE_PPROF",
 	"MEDIA_MAX_BYTES", "MEDIA_TTL", "MEDIA_SWEEP_INTERVAL",
@@ -62,39 +63,115 @@ func TestLoad_DefaultsStdio(t *testing.T) {
 	}
 }
 
-func TestLoad_HTTPWithAuthToken(t *testing.T) {
+func TestLoad_HTTPWithoutAdminToken(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("TRANSPORT", "http")
-	t.Setenv("AUTH_TOKEN", "secret")
+
+	// ADMIN_TOKEN is optional: the admin API is then anonymous and relies
+	// on the ingress. Session tokens still gate /mcp and /media.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminToken != "" {
+		t.Errorf("AdminToken = %q, want empty", cfg.AdminToken)
+	}
+	if cfg.MaxSessions != DefaultMaxSessions {
+		t.Errorf("MaxSessions = %d, want %d", cfg.MaxSessions, DefaultMaxSessions)
+	}
+	if cfg.StdioSession != "default" {
+		t.Errorf("StdioSession = %q, want default", cfg.StdioSession)
+	}
+	if got := cfg.SessionsDir(); got != "/data/sessions" {
+		t.Errorf("SessionsDir() = %q", got)
+	}
+	if got := cfg.RegistryPath(); got != "/data/sessions.db" {
+		t.Errorf("RegistryPath() = %q", got)
+	}
+}
+
+func TestLoad_AdminTokenAndMaxSessions(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("TRANSPORT", "http")
+	t.Setenv("ADMIN_TOKEN", "secret")
+	t.Setenv("MAX_SESSIONS", "3")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.AuthToken != "secret" {
-		t.Errorf("AuthToken = %q", cfg.AuthToken)
+	if cfg.AdminToken != "secret" {
+		t.Errorf("AdminToken = %q", cfg.AdminToken)
+	}
+	if cfg.MaxSessions != 3 {
+		t.Errorf("MaxSessions = %d", cfg.MaxSessions)
 	}
 }
 
-func TestLoad_HTTPMissingAuthFatal(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("TRANSPORT", "http")
+// TestLoad_LegacyAuthTokenFatal pins the breaking change: a 0.7 deployment
+// that still sets AUTH_TOKEN must fail loudly and point at the migration,
+// not boot with a token that no longer protects anything.
+func TestLoad_LegacyAuthTokenFatal(t *testing.T) {
+	for _, transport := range []string{"http", "stdio"} {
+		t.Run(transport, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("TRANSPORT", transport)
+			t.Setenv("AUTH_TOKEN", "secret")
 
-	_, err := Load()
-	if err == nil {
-		t.Fatal("Load: want error, got nil")
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load: want error, got nil")
+			}
+			for _, want := range []string{"AUTH_TOKEN", "POST /sessions", "README"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should mention %q", err, want)
+				}
+			}
+		})
 	}
-	if !strings.Contains(err.Error(), "AUTH_TOKEN") {
-		t.Errorf("error %q should mention AUTH_TOKEN", err)
+}
+
+func TestLoad_SessionSettingsRejectBadValues(t *testing.T) {
+	cases := []struct{ key, value string }{
+		{"MAX_SESSIONS", "0"},
+		{"MAX_SESSIONS", "-1"},
+		{"MAX_SESSIONS", "lots"},
+		{"STDIO_SESSION", "../etc"},
+		{"STDIO_SESSION", "Default"},
+		{"STDIO_SESSION", "a/b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("TRANSPORT", "stdio")
+			t.Setenv(tc.key, tc.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load: want error for %s=%q", tc.key, tc.value)
+			}
+		})
+	}
+}
+
+func TestValidSessionID(t *testing.T) {
+	t.Parallel()
+	good := []string{"a", "default", "alice-1", "team_b", "0", strings.Repeat("a", 63)}
+	bad := []string{"", "-a", "_a", "A", "a.b", "a/b", "..", ".", "a b", strings.Repeat("a", 64), "é"}
+	for _, id := range good {
+		if !ValidSessionID(id) {
+			t.Errorf("ValidSessionID(%q) = false, want true", id)
+		}
+	}
+	for _, id := range bad {
+		if ValidSessionID(id) {
+			t.Errorf("ValidSessionID(%q) = true, want false", id)
+		}
 	}
 }
 
 // TestLoad_HTTPAnyMTLSFatal pins that no MTLS_* combination can start an HTTP
 // server. Nothing in the binary builds a tls.Config, so every one of these once
-// meant "no TLS" — and the full trio was the dangerous case, not the partial
-// ones: alone it claimed to replace AUTH_TOKEN, and alongside AUTH_TOKEN it
-// started a plaintext listener that the operator believed was mutually
-// authenticated. The token cases below are the regression test for that.
+// meant "no TLS" and started a plaintext listener that the operator believed
+// was mutually authenticated.
 func TestLoad_HTTPAnyMTLSFatal(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -106,17 +183,15 @@ func TestLoad_HTTPAnyMTLSFatal(t *testing.T) {
 		{"only cert", "", "/cert", "", "", []string{"MTLS_CERT_FILE", "not implemented"}},
 		{"only key", "", "", "/key", "", []string{"MTLS_KEY_FILE", "not implemented"}},
 		{"CA+cert", "/ca", "/cert", "", "", []string{"MTLS_CA_FILE", "MTLS_CERT_FILE"}},
-		// The documented-and-broken config: trio instead of AUTH_TOKEN.
 		{"full trio", "/ca", "/cert", "/key", "", []string{"MTLS_CA_FILE", "MTLS_CERT_FILE", "MTLS_KEY_FILE"}},
-		// The one that used to boot a plaintext server.
-		{"full trio with token", "/ca", "/cert", "/key", "secret", []string{"MTLS_KEY_FILE", "not implemented"}},
-		{"partial with token", "/ca", "", "", "secret", []string{"MTLS_CA_FILE", "not implemented"}},
+		{"full trio with admin token", "/ca", "/cert", "/key", "secret", []string{"MTLS_KEY_FILE", "not implemented"}},
+		{"partial with admin token", "/ca", "", "", "secret", []string{"MTLS_CA_FILE", "not implemented"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			clearEnv(t)
 			t.Setenv("TRANSPORT", "http")
-			t.Setenv("AUTH_TOKEN", tc.token)
+			t.Setenv("ADMIN_TOKEN", tc.token)
 			t.Setenv("MTLS_CA_FILE", tc.ca)
 			t.Setenv("MTLS_CERT_FILE", tc.c)
 			t.Setenv("MTLS_KEY_FILE", tc.k)
@@ -152,7 +227,7 @@ func TestLoad_StdioIgnoresMTLS(t *testing.T) {
 func TestLoad_StdioNoAuthRequired(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("TRANSPORT", "stdio")
-	// No AUTH_TOKEN, no MTLS — must succeed.
+	// No ADMIN_TOKEN, no MTLS — must succeed.
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -241,7 +316,6 @@ func TestLoad_EnablePprofInvalid(t *testing.T) {
 func TestLoad_TransportCaseInsensitive(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("TRANSPORT", "HTTP")
-	t.Setenv("AUTH_TOKEN", "t")
 
 	cfg, err := Load()
 	if err != nil {
@@ -291,9 +365,6 @@ func TestLoad_MediaRetentionDefaults(t *testing.T) {
 	if cfg.MediaSweepInterval != time.Hour {
 		t.Errorf("MediaSweepInterval = %s, want 1h", cfg.MediaSweepInterval)
 	}
-	if got := cfg.MediaDir(); got != "/data/media" {
-		t.Errorf("MediaDir() = %q, want /data/media", got)
-	}
 }
 
 func TestLoad_MediaRetentionOverrides(t *testing.T) {
@@ -320,9 +391,6 @@ func TestLoad_MediaRetentionOverrides(t *testing.T) {
 	}
 	if cfg.MediaMaxUploadBytes != 26214400 {
 		t.Errorf("MediaMaxUploadBytes = %d", cfg.MediaMaxUploadBytes)
-	}
-	if got := cfg.MediaDir(); got != "/srv/wa/media" {
-		t.Errorf("MediaDir() = %q", got)
 	}
 }
 

@@ -1,6 +1,7 @@
 // Package server wires the loaded configuration and logger into a runnable
-// application. It owns the whatsmeow client and the MCP transport (stdio or
-// HTTP/SSE).
+// application. Over HTTP it hosts many WhatsApp sessions, each selected by
+// its own bearer token, plus the /sessions admin API; over stdio it serves
+// exactly one session.
 package server
 
 import (
@@ -8,28 +9,23 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 
-	"github.com/angel-manuel/whatsapp-mcp-docker/internal/audio"
-	"github.com/angel-manuel/whatsapp-mcp-docker/internal/cache"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/config"
 	applog "github.com/angel-manuel/whatsapp-mcp-docker/internal/log"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcp"
-	"github.com/angel-manuel/whatsapp-mcp-docker/internal/mcptools"
-	"github.com/angel-manuel/whatsapp-mcp-docker/internal/media"
-	"github.com/angel-manuel/whatsapp-mcp-docker/internal/tools"
+	"github.com/angel-manuel/whatsapp-mcp-docker/internal/sessions"
 	"github.com/angel-manuel/whatsapp-mcp-docker/internal/wa"
 )
 
-// shutdownTimeout bounds how long we wait for the MCP goroutine to exit after
+// shutdownTimeout bounds how long we wait for the transport to exit after
 // context cancellation so we don't block indefinitely on a slow consumer.
 const shutdownTimeout = 10 * time.Second
-
-// sweeperDrainTimeout bounds how long shutdown waits for the media
-// retention loop. It only ever blocks on a ticker, so this is a backstop
-// rather than a budget.
-const sweeperDrainTimeout = 2 * time.Second
 
 // Version is baked into the MCP server identity. main overrides this via
 // ldflags at build time.
@@ -46,6 +42,22 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 	return &Server{cfg: cfg, log: log}
 }
 
+// sessionOptions is the configuration every session shares.
+func (s *Server) sessionOptions() sessions.Options {
+	return sessions.Options{
+		Name:                "whatsapp-mcp",
+		Version:             Version,
+		Transport:           mcp.TransportMode(s.cfg.Transport),
+		PairDeviceName:      s.cfg.PairDeviceName,
+		FFmpegPath:          s.cfg.FFmpegPath,
+		MediaMaxBytes:       s.cfg.MediaMaxBytes,
+		MediaTTL:            s.cfg.MediaTTL,
+		MediaSweepInterval:  s.cfg.MediaSweepInterval,
+		MediaMaxUploadBytes: s.cfg.MediaMaxUploadBytes,
+		Logger:              s.log,
+	}
+}
+
 // Run blocks until ctx is cancelled or a subsystem errors fatally. It
 // orchestrates startup and graceful shutdown of all owned subsystems.
 func (s *Server) Run(ctx context.Context) error {
@@ -57,216 +69,153 @@ func (s *Server) Run(ctx context.Context) error {
 		slog.String("data_dir", s.cfg.DataDir),
 	)
 
-	// Cache migrations are schema-only; don't let a fast ctx cancel
-	// leave us with a half-applied schema. Use a detached background
-	// context so Open either succeeds or fails on its own terms.
-	// Opened before wa so the ingestor can be wired into the wa
-	// EventHook from the very first whatsmeow event.
-	cacheStore, err := cache.Open(context.Background(), s.cfg.DataDir)
+	if err := os.MkdirAll(s.cfg.DataDir, 0o700); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	// One process per volume. Each session also locks its own directory,
+	// but the registry and the sessions/ tree are shared state.
+	rootLock, err := wa.AcquireLock(filepath.Join(s.cfg.DataDir, ".lock"))
 	if err != nil {
-		return fmt.Errorf("cache open: %w", err)
+		return fmt.Errorf("lock data dir: %w", err)
+	}
+	defer func() { _ = rootLock.Release() }()
+
+	s.warnLegacyLayout()
+
+	var runErr error
+	if s.cfg.Transport == config.TransportStdio {
+		runErr = s.runStdio(ctx)
+	} else {
+		runErr = s.runHTTP(ctx)
+	}
+	applog.WithEvent(s.log, "server.stop").Info("server stopping")
+	return runErr
+}
+
+// warnLegacyLayout spots a 0.7 volume — session.db directly under DATA_DIR —
+// and says exactly how to move it into a session. Files are never moved
+// automatically: a wrong guess here would unlink someone's phone.
+func (s *Server) warnLegacyLayout() {
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "session.db")); err != nil {
+		return
+	}
+	target := filepath.Join(s.cfg.SessionsDir(), s.cfg.StdioSession)
+	applog.WithEvent(s.log, "server.legacy_layout").Warn(
+		"found a pre-multi-session layout: "+filepath.Join(s.cfg.DataDir, "session.db")+
+			" is not served. Stop the container, move session.db*, cache.db* and media/ into "+
+			target+"/ (owned by uid 1000), start it again, then POST /sessions {\"id\":\""+
+			s.cfg.StdioSession+"\"} to adopt it under a new token. See \"Upgrading from 0.7\" in README.md",
+		slog.String("target", target))
+}
+
+// runStdio serves the single STDIO_SESSION session over stdin/stdout. There
+// is no admin API in stdio mode, so the session is created on first start
+// and needs no registry entry or token.
+func (s *Server) runStdio(ctx context.Context) error {
+	id := s.cfg.StdioSession
+	sess, err := sessions.Open(id, filepath.Join(s.cfg.SessionsDir(), id), s.sessionOptions())
+	if err != nil {
+		return fmt.Errorf("open session %s: %w", id, err)
 	}
 	defer func() {
-		if err := cacheStore.Close(); err != nil {
-			applog.WithEvent(s.log, "server.stop").Warn("cache close",
+		if err := sess.Close(); err != nil {
+			applog.WithEvent(s.log, "server.stop").Warn("session close",
 				slog.String("err", err.Error()))
 		}
 	}()
-
-	ingestor := cache.NewIngestor(cacheStore, applog.WithEvent(s.log, "cache.ingest"))
-	syncOrch := cache.NewSyncOrchestrator(cacheStore, ingestor, applog.WithEvent(s.log, "cache.sync"))
-
-	// Like cache.Open above, wa session-store bringup runs sqlite migrations
-	// that should not be aborted mid-flight by a fast ctx cancel. Detach
-	// during Open; runtime cancellation is honored via Close/Disconnect.
-	// DeferConnect: the socket must not go live until the ingestor is fully
-	// wired (see SetPollDecrypter below). WhatsApp flushes its offline queue
-	// immediately after login, so an event handler that is still missing a
-	// dependency at that moment misses the burst, not a stray event.
-	// Logger: without this wa.Open falls back to waLog.Noop and every
-	// whatsmeow lifecycle record — reconnect attempts, connect failures,
-	// stream errors — is dropped, leaving a socket that dies and never
-	// recovers with no trace in the logs at all.
-	waCli, err := wa.Open(context.Background(), wa.Config{
-		DataDir:        s.cfg.DataDir,
-		PairDeviceName: s.cfg.PairDeviceName,
-		EventHook:      ingestor.HandleEvent,
-		DeferConnect:   true,
-		Logger:         wa.SlogAdapter(applog.WithEvent(s.log, "wa.whatsmeow")),
-	})
-	if err != nil {
-		return fmt.Errorf("wa open: %w", err)
-	}
-	defer func() {
-		if err := waCli.Close(); err != nil {
-			applog.WithEvent(s.log, "server.stop").Warn("wa close",
-				slog.String("err", err.Error()))
-		}
-	}()
-
-	// Poll votes arrive encrypted against the poll creation message, so the
-	// ingestor needs a way back into whatsmeow to read them. It is installed
-	// here rather than passed to NewIngestor because the client above needs
-	// the ingestor's HandleEvent as its own event hook — hence DeferConnect,
-	// which keeps this ordering from being a race. A vote that lands before
-	// the decrypter does is lost for good; WhatsApp never resends it.
-	ingestor.SetPollDecrypter(waCli)
-
-	// Now that every event consumer is wired, dial WhatsApp. A failure here is
-	// not fatal: auto-reconnect retries, exactly as the in-Open connect did.
-	if err := waCli.Connect(ctx); err != nil && !errors.Is(err, wa.ErrNotPaired) {
-		log.Warn("initial connect failed; auto-reconnect will retry",
-			slog.String("err", err.Error()))
-	}
-
-	// Media blobs: downloaded by download_media, uploaded by POST /media
-	// for the send tools to reference, and served by GET /media/{sha256}.
-	// Opened before the MCP server so both handlers can be mounted on the
-	// same mux, behind the same bearer auth.
-	mediaStore, err := media.Open(s.cfg.MediaDir(), media.Options{
-		MaxBytes:       s.cfg.MediaMaxBytes,
-		TTL:            s.cfg.MediaTTL,
-		MaxUploadBytes: s.cfg.MediaMaxUploadBytes,
-		Logger:         s.log,
-	})
-	if err != nil {
-		return fmt.Errorf("media open: %w", err)
-	}
-
-	mcpSrv, err := s.buildMCP(waCli, cacheStore, mediaStore)
-	if err != nil {
-		return fmt.Errorf("build mcp server: %w", err)
-	}
-	if err := tools.Register(mcpSrv.Registry(), tools.Deps{
-		Cache:    cacheStore,
-		WA:       waCli,
-		Ingestor: ingestor,
-		Sync:     syncOrch,
-		Media:    mediaStore,
-		// Probed per call, not at startup: the distroless image ships no
-		// ffmpeg, and an operator may bind-mount one into a running
-		// container. Absent ffmpeg means non-Opus audio is refused, never
-		// silently sent (REQUIREMENTS.md, FFMPEG_PATH).
-		Audio: audio.NewTranscoder(s.cfg.FFmpegPath),
-	}); err != nil {
-		return fmt.Errorf("register tools: %w", err)
-	}
 
 	mcpCtx, mcpCancel := context.WithCancel(ctx)
 	defer mcpCancel()
-
-	// Media retention: one pass now (the container may have been down for
-	// longer than MEDIA_TTL, and expired bytes must not stay readable),
-	// then every MEDIA_SWEEP_INTERVAL until shutdown.
-	sweeperDone := make(chan struct{})
-	go func() {
-		defer close(sweeperDone)
-		mediaStore.RunSweeper(mcpCtx, s.cfg.MediaSweepInterval)
-	}()
-
 	errCh := make(chan error, 1)
 	go func() {
-		if err := mcpSrv.Run(mcpCtx); err != nil {
+		if err := sess.MCP().Run(mcpCtx); err != nil {
 			errCh <- fmt.Errorf("mcp: %w", err)
 			return
 		}
 		errCh <- nil
 	}()
 
-	var runErr error
-	// Tracks whether the select below already took the MCP goroutine's result.
-	// errCh carries exactly one value, so draining again would block for the
-	// full shutdownTimeout — which is what happens whenever the transport
-	// exits on its own (stdio client disconnects, stdin at EOF).
-	mcpExited := false
+	// The stdio transport ending (client disconnected, stdin at EOF) is a
+	// normal shutdown signal, so take its result directly rather than
+	// draining again after cancel — errCh carries exactly one value.
 	select {
-	case <-ctx.Done():
 	case err := <-errCh:
-		runErr = err
-		mcpExited = true
+		return err
+	case <-ctx.Done():
 	}
 	mcpCancel()
-
-	// Wait for the MCP goroutine to exit so callers observe a clean shutdown.
-	if !mcpExited {
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer drainCancel()
-		select {
-		case err := <-errCh:
-			if runErr == nil && err != nil {
-				runErr = err
-			}
-		case <-drainCtx.Done():
-			applog.WithEvent(s.log, "server.stop").Warn("mcp goroutine drain timed out")
-		}
-	}
-
-	// The sweeper only ever waits on a ticker, so it exits promptly once
-	// mcpCtx is cancelled. Bound the wait anyway, and keep it short: a
-	// stuck retention pass must not hold up process exit.
-	sweeperDrain := time.NewTimer(sweeperDrainTimeout)
-	defer sweeperDrain.Stop()
 	select {
-	case <-sweeperDone:
-	case <-sweeperDrain.C:
-		applog.WithEvent(s.log, "server.stop").Warn("media sweeper drain timed out")
+	case err := <-errCh:
+		return err
+	case <-time.After(shutdownTimeout):
+		applog.WithEvent(s.log, "server.stop").Warn("mcp goroutine drain timed out")
+		return nil
 	}
-
-	applog.WithEvent(s.log, "server.stop").Info("server stopping")
-	return runErr
 }
 
-// waPairingState binds the MCP gate's two predicates to the whatsmeow
-// client. They must stay separate: IsPaired asks the on-disk device
-// store, IsConnected asks the live socket, and collapsing both into
-// LoggedIn (as this once did) reports a linked-but-offline client as
-// not_paired — which sends callers to pairing_start, which then refuses
-// with already_paired because the device row is still there.
-type waPairingState struct{ cli *wa.Client }
-
-// IsPaired reports whether device credentials exist on disk. This is the
-// same predicate wa.StartPairing uses to reject with ErrAlreadyPaired, so
-// the gate and the pairing tools can no longer disagree.
-func (w waPairingState) IsPaired() bool { return w.cli.IsPaired() }
-
-// IsConnected reports whether the socket is authenticated right now.
-func (w waPairingState) IsConnected() bool { return w.cli.Status().LoggedIn }
-
-// buildMCP constructs the MCP subsystem, binds its pairing gate to the
-// whatsmeow client (tools fail with not_paired until the device is linked,
-// then with not_connected until the socket is live), and registers the
-// read-side cache-backed tools against its registry.
-func (s *Server) buildMCP(waCli *wa.Client, cacheStore *cache.Store, mediaStore *media.Store) (*mcp.Server, error) {
-	pairing := waPairingState{cli: waCli}
-	reg := mcp.NewRegistry()
-	if err := mcptools.Register(reg, cacheStore); err != nil {
-		return nil, fmt.Errorf("register cache tools: %w", err)
+// runHTTP hosts every registered session behind one listener.
+func (s *Server) runHTTP(ctx context.Context) error {
+	reg, err := sessions.OpenRegistry(context.Background(), s.cfg.RegistryPath())
+	if err != nil {
+		return err
 	}
-	// Everything registered so far came from mcptools, whose Register takes
-	// a *cache.Store and nothing else — those tools have no way to reach the
-	// network even in principle. Reading the names back off the registry at
-	// this exact point derives the cache-only set from that structural fact
-	// instead of restating it as a list that can drift: a tool added to
-	// mcptools is offline-capable automatically, and one that grows a
-	// whatsmeow dependency cannot be registered here in the first place.
-	cacheOnly := reg.Names()
-	// The media byte routes ride the MCP listener: same port, same
-	// AUTH_TOKEN, same bearer middleware. They exist for the one thing MCP
-	// cannot do — transfer bytes — and deliberately do not reopen the
-	// :8082 admin API removed in 99b0ce7. GET is the download_media half;
-	// POST is the inbound half the media send tools consume.
-	routes := map[string]http.Handler{
-		media.RoutePrefix + "{sha256}": mediaStore.Handler(),
-		media.UploadRoutePattern:       mediaStore.UploadHandler(),
+	defer func() { _ = reg.Close() }()
+
+	opts := s.sessionOptions()
+	mgr := sessions.NewManager(reg, s.cfg.SessionsDir(), s.cfg.MaxSessions,
+		func(id, dir string) (sessions.Instance, error) { return sessions.Open(id, dir, opts) },
+		s.log)
+	if err := mgr.Start(ctx); err != nil {
+		return err
 	}
-	return mcp.New(mcp.Config{
-		Transport:      mcp.TransportMode(s.cfg.Transport),
-		BindAddr:       s.cfg.BindAddr,
-		Port:           s.cfg.Port,
-		AuthToken:      s.cfg.AuthToken,
-		Name:           "whatsapp-mcp",
-		Version:        Version,
-		Routes:         routes,
-		CacheOnlyTools: cacheOnly,
-	}, s.log, reg, pairing)
+	defer func() {
+		if err := mgr.Close(); err != nil {
+			applog.WithEvent(s.log, "server.stop").Warn("sessions close",
+				slog.String("err", err.Error()))
+		}
+	}()
+
+	if s.cfg.AdminToken == "" {
+		applog.WithEvent(s.log, "server.start").Warn(
+			"ADMIN_TOKEN is unset: the /sessions admin API is anonymous. " +
+				"Anyone who can reach it can create sessions and delete them. " +
+				"Restrict it at the ingress, or set ADMIN_TOKEN")
+	}
+
+	addr := net.JoinHostPort(s.cfg.BindAddr, strconv.Itoa(s.cfg.Port))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	httpSrv := &http.Server{
+		Handler:           NewHandler(mgr, s.cfg.AdminToken, s.log),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	applog.WithEvent(s.log, "mcp.start").Info("http server starting",
+		slog.String("addr", ln.Addr().String()),
+		slog.Int("sessions", mgr.Count()),
+		slog.Int("max_sessions", s.cfg.MaxSessions),
+	)
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case err := <-errCh:
+		return fmt.Errorf("http: %w", err)
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutdownCtx)
+	applog.WithEvent(s.log, "mcp.stop").Info("http server stopped")
+	// Serve reports ErrServerClosed (sent as nil) after Shutdown; anything
+	// else is a real failure that raced the cancellation.
+	return <-errCh
 }

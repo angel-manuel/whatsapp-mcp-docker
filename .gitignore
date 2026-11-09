@@ -28,3 +28,7 @@ coverage.html
 
 # Local env (direnv)
 .envrc
+
+# Local dev tokens minted by `make run-master`
+.auth_token
+.admin_token

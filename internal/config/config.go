@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,19 +25,31 @@ const (
 
 // Config is the fully-resolved runtime configuration.
 type Config struct {
-	Transport      Transport
-	BindAddr       string
-	Port           int
-	DataDir        string
-	LogLevel       string
-	LogFormat      string
-	AuthToken      string
-	MTLSCAFile     string
-	MTLSCertFile   string
-	MTLSKeyFile    string
-	PairDeviceName string
-	FFmpegPath     string
-	EnablePprof    bool
+	Transport Transport
+	BindAddr  string
+	Port      int
+	DataDir   string
+	LogLevel  string
+	LogFormat string
+	// AdminToken, when set, is required as a bearer token on the /sessions
+	// admin API. Empty leaves that API anonymous: it is defence in depth
+	// behind the ingress, which is expected to restrict it.
+	AdminToken string
+	// MaxSessions caps how many WhatsApp sessions this process hosts. Each
+	// one holds a live websocket and its own SQLite handles.
+	MaxSessions int
+	// StdioSession names the single session served in stdio mode, which has
+	// no HTTP admin API to create one. It is created on first start.
+	StdioSession string
+	// legacyAuthToken records that the removed AUTH_TOKEN variable is still
+	// set, so Validate can refuse to start instead of silently ignoring it.
+	legacyAuthToken bool
+	MTLSCAFile      string
+	MTLSCertFile    string
+	MTLSKeyFile     string
+	PairDeviceName  string
+	FFmpegPath      string
+	EnablePprof     bool
 
 	// MediaMaxBytes caps the total size of the downloaded-media store at
 	// {DataDir}/media. Zero disables the cap. Enforced by evicting the
@@ -65,10 +78,18 @@ const DefaultMediaMaxBytes int64 = 1 << 30
 // the volume before the retention sweeper next runs.
 const DefaultMediaMaxUploadBytes int64 = 100 << 20
 
-// MediaDir is the directory holding blobs downloaded by the download_media
-// tool and served by GET /media/{sha256}.
-func (c *Config) MediaDir() string {
-	return filepath.Join(c.DataDir, "media")
+// DefaultMaxSessions is the out-of-the-box cap on hosted sessions.
+const DefaultMaxSessions = 20
+
+// SessionsDir holds one subdirectory per session, each laid out the way
+// DATA_DIR itself was before multi-session: session.db, cache.db, media/.
+func (c *Config) SessionsDir() string {
+	return filepath.Join(c.DataDir, "sessions")
+}
+
+// RegistryPath is the SQLite database mapping session ids to token hashes.
+func (c *Config) RegistryPath() string {
+	return filepath.Join(c.DataDir, "sessions.db")
 }
 
 // Load reads the process environment into a Config and validates it.
@@ -83,7 +104,8 @@ func Load() (*Config, error) {
 		DataDir:        getEnv("DATA_DIR", "/data"),
 		LogLevel:       strings.ToLower(getEnv("LOG_LEVEL", "info")),
 		LogFormat:      strings.ToLower(getEnv("LOG_FORMAT", "json")),
-		AuthToken:      os.Getenv("AUTH_TOKEN"),
+		AdminToken:     os.Getenv("ADMIN_TOKEN"),
+		StdioSession:   getEnv("STDIO_SESSION", "default"),
 		MTLSCAFile:     os.Getenv("MTLS_CA_FILE"),
 		MTLSCertFile:   os.Getenv("MTLS_CERT_FILE"),
 		MTLSKeyFile:    os.Getenv("MTLS_KEY_FILE"),
@@ -91,8 +113,13 @@ func Load() (*Config, error) {
 		FFmpegPath:     getEnv("FFMPEG_PATH", "/usr/bin/ffmpeg"),
 	}
 
+	_, cfg.legacyAuthToken = lookupNonEmpty("AUTH_TOKEN")
+
 	var err error
 	if cfg.Port, err = getEnvInt("PORT", 8081); err != nil {
+		return nil, err
+	}
+	if cfg.MaxSessions, err = getEnvInt("MAX_SESSIONS", DefaultMaxSessions); err != nil {
 		return nil, err
 	}
 	if cfg.EnablePprof, err = getEnvBool("ENABLE_PPROF", false); err != nil {
@@ -117,10 +144,22 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// ErrLegacyAuthToken is returned when the pre-multi-session AUTH_TOKEN
+// variable is still set. The single shared token no longer exists: each
+// session has its own, issued by POST /sessions.
+var ErrLegacyAuthToken = errors.New("AUTH_TOKEN was removed in the multi-session release: " +
+	"each session now has its own token from POST /sessions, and ADMIN_TOKEN guards that API. " +
+	"Unset AUTH_TOKEN and follow \"Upgrading from 0.7\" in README.md to migrate an existing /data volume")
+
 // Validate enforces invariants that cannot be expressed in the field types.
-// In particular: HTTP transport requires AUTH_TOKEN, and rejects the MTLS_*
-// vars outright because no TLS listener exists to honour them.
+// In particular: the removed AUTH_TOKEN is refused by name, and HTTP
+// transport rejects the MTLS_* vars outright because no TLS listener exists
+// to honour them.
 func (c *Config) Validate() error {
+	if c.legacyAuthToken {
+		return ErrLegacyAuthToken
+	}
+
 	switch c.Transport {
 	case TransportHTTP, TransportStdio:
 	default:
@@ -146,6 +185,13 @@ func (c *Config) Validate() error {
 
 	if c.DataDir == "" {
 		return errors.New("DATA_DIR must not be empty")
+	}
+
+	if c.MaxSessions < 1 {
+		return fmt.Errorf("MAX_SESSIONS must be at least 1, got %d", c.MaxSessions)
+	}
+	if !ValidSessionID(c.StdioSession) {
+		return fmt.Errorf("STDIO_SESSION must match %s, got %q", sessionIDPattern, c.StdioSession)
 	}
 
 	if c.MediaMaxBytes < 0 {
@@ -187,24 +233,21 @@ func (c *Config) mtlsVarsSet() []string {
 	return set
 }
 
-// validateHTTPAuth rejects the two configurations that used to look like
-// stronger auth than AUTH_TOKEN and were in fact weaker.
+// validateHTTPAuth rejects the MTLS_* vars, which used to look like
+// stronger auth than a bearer token and were in fact weaker.
 //
-// mTLS is checked first, and fatally: nothing in this binary builds a
+// The check is fatal: nothing in this binary builds a
 // tls.Config or calls ServeTLS, so setting the trio previously either killed
 // startup deep in the MCP layer (trio alone) or — worse — brought up a
 // plaintext listener with no client-certificate check while the operator
-// believed they had mutual TLS (trio plus AUTH_TOKEN). Failing here, by name,
+// believed they had mutual TLS. Failing here, by name,
 // is the only honest answer until a TLS listener exists.
 func (c *Config) validateHTTPAuth() error {
 	if set := c.mtlsVarsSet(); len(set) > 0 {
 		return fmt.Errorf("%s: mTLS is not implemented — this server has no TLS "+
 			"listener, so these silently served plaintext. Unset them and terminate "+
-			"TLS in a reverse proxy; AUTH_TOKEN is the only auth this server enforces",
+			"TLS in a reverse proxy; bearer tokens are the only auth this server enforces",
 			strings.Join(set, ", "))
-	}
-	if c.AuthToken == "" {
-		return errors.New("HTTP transport requires AUTH_TOKEN")
 	}
 	return nil
 }
@@ -274,3 +317,13 @@ func getEnvBool(key string, def bool) (bool, error) {
 	}
 	return b, nil
 }
+
+// sessionIDPattern is the shape of a session id. It doubles as a directory
+// name under SessionsDir, so it admits no separators, dots or uppercase
+// (case-insensitive filesystems would otherwise alias two ids).
+const sessionIDPattern = `^[a-z0-9][a-z0-9_-]{0,62}$`
+
+var sessionIDRe = regexp.MustCompile(sessionIDPattern)
+
+// ValidSessionID reports whether id is an acceptable session id.
+func ValidSessionID(id string) bool { return sessionIDRe.MatchString(id) }

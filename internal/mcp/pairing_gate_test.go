@@ -2,9 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -180,82 +177,6 @@ func TestPing_ReportsPairedAndConnectedSeparately(t *testing.T) {
 				t.Errorf("connected=%v, want %v", got, tc.connected)
 			}
 		})
-	}
-}
-
-// TestHealthz_ReflectsWhatsAppState pins the probe contract. The critical
-// row is "paired, offline" → 503: a flat always-200 probe let a container
-// whose socket had been dead for days keep reporting healthy.
-func TestHealthz_ReflectsWhatsAppState(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name       string
-		state      PairingState
-		wantStatus int
-		wantBody   string
-	}{
-		{"healthy", fixedState{paired: true, connected: true}, http.StatusOK, HealthOK},
-		// Awaiting pairing is not a fault: a fresh container must stay
-		// healthy, or it could never be linked in the first place.
-		{"unpaired", fixedState{}, http.StatusOK, HealthAwaitingPairing},
-		{"paired but offline", pairedOffline, http.StatusServiceUnavailable, HealthDisconnected},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			srv := newTestServer(t, TransportHTTP, tc.state)
-			ts := httptest.NewServer(srv.HTTPHandler())
-			defer ts.Close()
-
-			resp, err := http.Get(ts.URL + "/healthz")
-			if err != nil {
-				t.Fatalf("Get: %v", err)
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != tc.wantStatus {
-				t.Errorf("status=%d, want %d", resp.StatusCode, tc.wantStatus)
-			}
-			var body struct {
-				Status string `json:"status"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-				t.Fatalf("decode body: %v", err)
-			}
-			if body.Status != tc.wantBody {
-				t.Errorf("status=%q, want %q", body.Status, tc.wantBody)
-			}
-		})
-	}
-}
-
-// TestHealthz_LeaksNoIdentity guards the one route outside the bearer
-// gate: it may report coarse state, never who the device belongs to.
-func TestHealthz_LeaksNoIdentity(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestServer(t, TransportHTTP, pairedOffline)
-	ts := httptest.NewServer(srv.HTTPHandler())
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/healthz")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var body map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if len(body) != 1 {
-		t.Errorf("body has %d keys (%v), want exactly 1 (status)", len(body), body)
-	}
-	if _, ok := body["status"]; !ok {
-		t.Errorf("body missing status key: %v", body)
 	}
 }
 
